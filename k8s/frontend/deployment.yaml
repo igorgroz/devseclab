@@ -15,7 +15,7 @@ spec:
     spec:
       containers:
         - name: frontend
-          image: 510151297987.dkr.ecr.ap-southeast-2.amazonaws.com/dsl-frontend:d90ba8a689c0935115549d11872f0f040001af9d
+          image: 510151297987.dkr.ecr.ap-southeast-2.amazonaws.com/dsl-frontend:b0b6db1bc52c48c17733aad573d6024ede41efe0
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080  # nginx-unprivileged listens on 8080 (non-root)

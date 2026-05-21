@@ -831,16 +831,37 @@ jobs:
         # The mirror step copies image layers only — not the cosign .sig OCI
         # artifact. Sign the ECR image directly so Kyverno can verify it when
         # admitting pods that reference the ECR URI.
+        #
+        # IMPORTANT: we must sign using the ECR digest, NOT the GHCR digest
+        # from steps.push-backend.outputs.digest. Docker re-serialises the
+        # manifest JSON when pushing to ECR (field ordering, whitespace), which
+        # changes the SHA-256 and produces a different digest even though the
+        # image layers are identical. If we sign with the GHCR digest, cosign
+        # stores the .sig in ECR tagged sha256-<ghcr-digest>.sig — but Kyverno
+        # resolves the ECR image to its ECR digest and looks for
+        # sha256-<ecr-digest>.sig, finding nothing and failing verification.
         run: |
           ECR="${{ steps.ecr-login.outputs.registry }}"
-          cosign sign --yes \
-            "${ECR}/dsl-backend@${{ steps.push-backend.outputs.digest }}"
+          ECR_DIGEST=$(aws ecr describe-images \
+            --repository-name dsl-backend \
+            --image-ids imageTag=${{ github.sha }} \
+            --region "${AWS_REGION}" \
+            --query 'imageDetails[0].imageDigest' \
+            --output text)
+          echo "ECR backend digest: ${ECR_DIGEST}"
+          cosign sign --yes "${ECR}/dsl-backend@${ECR_DIGEST}"
 
       - name: Sign frontend image in ECR
         run: |
           ECR="${{ steps.ecr-login.outputs.registry }}"
-          cosign sign --yes \
-            "${ECR}/dsl-frontend@${{ steps.push-frontend.outputs.digest }}"
+          ECR_DIGEST=$(aws ecr describe-images \
+            --repository-name dsl-frontend \
+            --image-ids imageTag=${{ github.sha }} \
+            --region "${AWS_REGION}" \
+            --query 'imageDetails[0].imageDigest' \
+            --output text)
+          echo "ECR frontend digest: ${ECR_DIGEST}"
+          cosign sign --yes "${ECR}/dsl-frontend@${ECR_DIGEST}"
 
 # ══════════════════════════════════════════════════════════════════
 # JOB 6 — DAST: OWASP ZAP
@@ -1415,41 +1436,72 @@ jobs:
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Attest backend image in ECR
+        # Use the actual ECR digest, not the GHCR digest. Docker re-serialises
+        # the manifest when mirroring, producing a different SHA-256 digest in
+        # ECR. cosign attest must reference the ECR digest so the .att artifact
+        # is stored under sha256-<ecr-digest>.att — which is what Kyverno looks
+        # for when verifying pods that reference the ECR image URI.
         env:
           PREDICATE_TYPE: https://oznetsecure.com.au/attestations/vuln-signoff/v1
         run: |
           ECR="${{ steps.ecr-login-attest.outputs.registry }}"
+          ECR_DIGEST=$(aws ecr describe-images \
+            --repository-name dsl-backend \
+            --image-ids imageTag=${{ github.sha }} \
+            --region "${AWS_REGION}" \
+            --query 'imageDetails[0].imageDigest' \
+            --output text)
+          echo "ECR backend digest: ${ECR_DIGEST}"
           cosign attest --yes \
             --type "${PREDICATE_TYPE}" \
             --predicate predicate.json \
-            "${ECR}/dsl-backend@${{ needs.push-and-sign.outputs.backend-digest }}"
+            "${ECR}/dsl-backend@${ECR_DIGEST}"
 
       - name: Attest frontend image in ECR
         env:
           PREDICATE_TYPE: https://oznetsecure.com.au/attestations/vuln-signoff/v1
         run: |
           ECR="${{ steps.ecr-login-attest.outputs.registry }}"
+          ECR_DIGEST=$(aws ecr describe-images \
+            --repository-name dsl-frontend \
+            --image-ids imageTag=${{ github.sha }} \
+            --region "${AWS_REGION}" \
+            --query 'imageDetails[0].imageDigest' \
+            --output text)
+          echo "ECR frontend digest: ${ECR_DIGEST}"
           cosign attest --yes \
             --type "${PREDICATE_TYPE}" \
             --predicate predicate.json \
-            "${ECR}/dsl-frontend@${{ needs.push-and-sign.outputs.frontend-digest }}"
+            "${ECR}/dsl-frontend@${ECR_DIGEST}"
 
       - name: Verify ECR attestations
         env:
           PREDICATE_TYPE: https://oznetsecure.com.au/attestations/vuln-signoff/v1
         run: |
           ECR="${{ steps.ecr-login-attest.outputs.registry }}"
+          BACKEND_ECR_DIGEST=$(aws ecr describe-images \
+            --repository-name dsl-backend \
+            --image-ids imageTag=${{ github.sha }} \
+            --region "${AWS_REGION}" \
+            --query 'imageDetails[0].imageDigest' \
+            --output text)
+          FRONTEND_ECR_DIGEST=$(aws ecr describe-images \
+            --repository-name dsl-frontend \
+            --image-ids imageTag=${{ github.sha }} \
+            --region "${AWS_REGION}" \
+            --query 'imageDetails[0].imageDigest' \
+            --output text)
           cosign verify-attestation \
             --type "${PREDICATE_TYPE}" \
             --certificate-identity-regexp="https://github.com/${{ github.repository }}/.github/workflows/.*" \
             --certificate-oidc-issuer="https://token.actions.githubusercontent.com" \
-            "${ECR}/dsl-backend@${{ needs.push-and-sign.outputs.backend-digest }}" \
+            "${ECR}/dsl-backend@${BACKEND_ECR_DIGEST}" \
             > /dev/null
           cosign verify-attestation \
             --type "${PREDICATE_TYPE}" \
             --certificate-identity-regexp="https://github.com/${{ github.repository }}/.github/workflows/.*" \
             --certificate-oidc-issuer="https://token.actions.githubusercontent.com" \
-            "${ECR}/dsl-frontend@${{ needs.push-and-sign.outputs.frontend-digest }}" \
+            "${ECR}/dsl-frontend@${FRONTEND_ECR_DIGEST}" \
             > /dev/null
           echo "vuln-signoff/v1 attestation verified on both ECR image digests."
 
