@@ -9,73 +9,97 @@ Learning exercise — app has no practical value; all value is in DevSecOps and
 modern app security concepts built around it.
 
 ## Current phase
-**Kyverno admission policy — in progress.** Cluster up (not destroyed).
-Policy manifest written and committed. deploy-lab.yml Kyverno install/wait
-logic iterated through multiple fixes; blocked on Kyverno TLS initialisation
-race condition. Cluster manually cleaned (kyverno namespace + webhook configs
-deleted). Ready for clean deploy-lab.yml run next session.
+**Kyverno admission enforcement — operational end-to-end.** Cluster UP.
+deploy-lab.yml runs clean with `run_terraform` checked: Terraform applies,
+Kyverno installs HA with IRSA wired to ECR, admission-controller pods carry
+AWS_ROLE_ARN + AWS_WEB_IDENTITY_TOKEN_FILE, backend + frontend roll out and
+pass cosign signature + vuln-signoff/v1 attestation verify on admission.
+ClusterPolicy still set to `Audit` (validationFailureAction). Next: flip to
+`Enforce` and validate end-to-end (signed image passes, unsigned rejected).
 
 ## Last commit
-`fix(deploy-lab): wait for Kyverno TLS secret and webhook config` (May 18 2026)
+`fix(deploy-lab): apply Kyverno IRSA annotation via kubectl, not helm --set` (757ecd3)
+Uncommitted: 3 new docs (KYVERNO_ECR_VERIFY_FIX, KYVERNO_DEEP_DIVE,
+IDENTITY_TRUST_AND_SECRETS) + this SESSION_STATE update.
 
-## Resolved this session
-- **Rename pass complete** — all `sqlinj` → `dsl` across repo + live AWS.
-  ECR repos recreated as `dsl-backend`/`dsl-frontend` (Terraform-managed,
-  scan_on_push=true). Old `sqlinj-*` repos destroyed. Pipeline green.
-- **ECR state bucket refs** reverted to real `sqlinj-tfstate-*` bucket name
-  (rename touched backend.tf — live bucket can't be renamed in-place).
-- **Kyverno ClusterPolicy** written: `k8s/kyverno/clusterpolicy-image-verify.yaml`
-  — keyless cosign signature + vuln-signoff/v1 attestation enforced on all
-  Pods in the `dsl` namespace. postgres (db Pod) excluded via imageReferences.
-- **deploy-lab.yml** updated: Kyverno Helm install + webhook wait + policy apply
-  steps added before workload deployments.
-- **security-pipeline deploy job** fixed: graceful skip if backend/frontend
-  Deployments not yet provisioned (`deployment not found` was hard failing).
-- **deployment.yaml images** updated from deleted `f814ac7` (sqlinj-backend ECR)
-  to `af16635` (exists in new dsl-backend/dsl-frontend ECR repos, signed).
+## Resolved this session (May 19 2026)
+- **Kyverno ECR verify chain fixed.** Real root cause: kyverno-admission-controller
+  SA had no IRSA, so cosign couldn't authenticate to private ECR for .sig/.att
+  artifacts — the /v2/ auth-challenge loop hung against hop-limit-blocked IMDS
+  until the 10s webhook timeout fired with "context deadline exceeded". The
+  symptom looked like webhook unreachability but was stalled verify.
+- **Three compounding fixes deployed**:
+  - `terraform/infra-lab/kyverno-irsa.tf` — IRSA role + policy, ECR read scoped
+    to dsl-backend / dsl-frontend, OIDC trust pinned to the kyverno SA.
+  - `helm/kyverno/values.yaml` — replicas=3, webhookTimeoutSeconds=30,
+    memory.limit=1Gi, PDB, `registry.k8s.io/kubectl` for cleanup CronJobs
+    (kills the dead `bitnami/kubectl:1.28.5` ImagePullBackOff).
+  - `.github/workflows/deploy-lab.yml` — reads new TF output, applies IRSA
+    annotation via `kubectl annotate sa --overwrite` (helm --set with dotted
+    key was unreliable) + rollout restart, asserts AWS_ROLE_ARN /
+    AWS_WEB_IDENTITY_TOKEN_FILE on the pod via jsonpath (distroless = no exec).
+- **Doc**: `KYVERNO_ECR_VERIFY_FIX.md` (root) — full root-cause analysis,
+  diagnostic flow, fix rationale per value, success criteria.
+- **Side discovery**: `validationFailureAction: Audit` does NOT save you when
+  verify *errors* (vs *fails*) — Kyverno ≥ v1.12 treats verifyImages errors
+  as deny by default. Worth a callout in LAB_SECURITY_DECISIONS.md later.
+- **Learning docs written**: `KYVERNO_DEEP_DIVE.md` (concepts, controllers,
+  best practices, phase fit) and `IDENTITY_TRUST_AND_SECRETS.md` (full
+  identity/trust/secrets map + risk review, built from a repo-wide audit).
 
 ## Open issues
-1. **Kyverno TLS race condition** — admission controller pod becomes Ready before
-   cert manager writes `kyverno-svc.kyverno.svc.kyverno-tls-pair` secret and
-   webhook controller registers MutatingWebhookConfiguration. Wait logic now
-   checks all three conditions; needs a clean cluster run to validate.
-   **Cluster state:** kyverno namespace deleted, all MutatingWebhookConfigurations
-   deleted manually. Ready for fresh deploy-lab.yml with terraform checked.
+1. **ClusterPolicy still in Audit mode.** Flip back to `Enforce` after a clean
+   run, then redeploy backend/frontend to re-exercise admission. Add a
+   negative-test step: deploy an unsigned `nginx:latest` and confirm rejection.
 2. **ALBC vpcId pin** — hop_limit=1 prevents IMDS auto-discovery. Preferred fix:
    cluster-info ConfigMap from Terraform VPC output.
-7. **ALB allowlist /32** — `bin/whitelist-me.sh` reduces toil.
-10. **Kyverno enforcement** — policy in place, needs successful deploy to validate.
+3. **ALB allowlist /32** — `bin/whitelist-me.sh` reduces toil.
+4. **Bitnami fallback risk** — chart upgrades may regress to `bitnami/kubectl`.
+   Pin the chart version explicitly and watch upstream for cleanupJobs image
+   structure changes.
+5. **Identity/secrets hardening backlog** (from IDENTITY_TRUST_AND_SECRETS.md
+   risk review): GitHub Actions + nightly-destroy roles hold `AdministratorAccess`;
+   GitHub OIDC `sub` is repo-wide (`repo:igorgroz/devseclab:*`); `AUTH_MODE=dast`
+   HS256 bypass ships in the prod image; public EKS endpoint; no KMS on etcd
+   Secrets; `dsl-eks-backend-role` IRSA is dormant; single Postgres superuser
+   doubles as app login.
 
 ## Next actions — start of next session
-1. **Run deploy-lab.yml with terraform checked** — fresh cluster, clean Kyverno
-   install, validate admission policy end-to-end (signed image passes, unsigned
-   image rejected).
-2. **NetworkPolicies + PSS** on the `dsl` namespace.
-3. **Node-group hop-limit fix** — cluster-info ConfigMap, drop vpcId pin.
-4. **Enterprise platform track** — Kong, Istio mTLS, CloudFront + WAF.
+1. **Negative-test the policy**: `kubectl run nginx --image=nginx:latest -n dsl`
+   should be rejected. Confirm Kyverno blocks with a clean error.
+2. **Flip ClusterPolicy to Enforce**, redeploy, confirm continued success.
+3. **NetworkPolicies + PSS** on the `dsl` namespace.
+4. **Node-group hop-limit fix** — cluster-info ConfigMap, drop vpcId pin.
+5. **Enterprise platform track** — Kong, Istio mTLS, CloudFront + WAF.
    Decision pending: build new microservices app or use reference workload
    (Google Online Boutique / Weaveworks Sock Shop).
 
 ## Lab state
-**Destroyed.** 61 resources destroyed via stoplab.sh.
-infra-base intact: ECR repos `dsl-backend`/`dsl-frontend` with signed images,
-SM entries, ACM cert, Route 53 zone. Next spin-up has working images in ECR.
+**UP.** EKS `dsl-eks` running with Kyverno 3.2.6 (HA, IRSA, 30s webhook
+timeout), backend + frontend rolled out at SHA `d90ba8a`, ClusterPolicy
+`dsl-verify-images` in Audit. Use `stoplab.sh` to tear down when done.
 
 ## Key paths
 - Kyverno policy: `k8s/kyverno/clusterpolicy-image-verify.yaml`
+- Kyverno IRSA: `terraform/infra-lab/kyverno-irsa.tf`
+- Kyverno chart values: `helm/kyverno/values.yaml`
+- Verify-fix runbook: `KYVERNO_ECR_VERIFY_FIX.md`
+- Kyverno concepts: `KYVERNO_DEEP_DIVE.md`
+- Identity/trust/secrets map + risk review: `IDENTITY_TRUST_AND_SECRETS.md`
 - Phase docs: `PHASE2.md`, `PHASE3B3.md`
 - Manifests: `k8s/{backend,frontend,db,eso}/`, `k8s/ingress.yaml`
-- Helm values: `helm/{alb-controller,external-secrets}/values.yaml`
+- Helm values: `helm/{alb-controller,external-secrets,kyverno}/values.yaml`
 - IaC: `terraform/infra-lab/`, `terraform/infra-base/`
 - Pipeline: `.github/workflows/security-pipeline.yml`, `deploy-lab.yml`
 - Attestation schema: `.github/attestations/vuln-signoff.schema.json`
 
 ## AWS / cluster identifiers
 - Account `510151297987`, region `ap-southeast-2`
-- EKS cluster `dsl-eks` (v1.35, AL2023) — **UP**
+- EKS cluster `dsl-eks` (v1.35.4, AL2023) — **UP**
 - ECR: `510151297987.dkr.ecr.ap-southeast-2.amazonaws.com/dsl-{backend,frontend}`
-- Current image SHA: `af16635` (signed, in ECR + GHCR)
-- IRSA: `dsl-eks-eso-role`, `dsl-backend-sa` (names on next spin-up)
-- Secrets: `sqlinj/backend/db-password`, `sqlinj/backend/jwt-secret` (SM rename pending)
+- Running image SHA: `d90ba8a` (signed + attested in ECR + GHCR)
+- IRSA: `dsl-eks-eso-role`, `dsl-backend-sa`, `dsl-eks-kyverno-ecr-read` (new)
+- Secrets (SM, authoritative): `dsl/backend/db-password`, `dsl/backend/jwt-secret`
+  (state bucket still legacy `sqlinj-tfstate-*` — can't rename in place)
 - Entra: tenant `487f7bd9-…`, SPA `a6960366-…`, API `af63b7cb-…` (v2 tokens)
 - Lab URL: `https://lab.oznetsecure.com.au`
