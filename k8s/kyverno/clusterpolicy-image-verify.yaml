@@ -138,8 +138,10 @@ spec:
 
       # --- Attestation verification ---
       # Verifies the vuln-signoff/v1 predicate exists and gate statuses are
-      # in the allowed set. The predicate field in JMESPath expressions maps
-      # to the decoded attestation payload.
+      # in the allowed set. Kyverno exposes the decoded predicate CONTENT at
+      # the JMESPath root, so reference fields directly (gates.sast.status) —
+      # NOT predicate.gates.sast.status. The predicate. prefix fails with
+      # 'Unknown key "predicate"'.
       attestations:
       - type: "https://oznetsecure.com.au/attestations/vuln-signoff/v1"
         attestors:
@@ -155,22 +157,22 @@ spec:
         - all:
           # Note: message fields do not have access to the predicate variable
           # context in Kyverno 3.x — only the key field does. Static strings used.
-          - key: "{{ predicate.gates.sast.status }}"
+          - key: "{{ gates.sast.status }}"
             operator: AnyIn
             value: ["clean", "accepted", "skipped"]
             message: "SAST gate status is not in [clean, accepted, skipped]"
 
-          - key: "{{ predicate.gates.sca.status }}"
+          - key: "{{ gates.sca.status }}"
             operator: AnyIn
             value: ["clean", "accepted", "skipped"]
             message: "SCA gate status is not in [clean, accepted, skipped]"
 
-          - key: "{{ predicate.gates.trivy.status }}"
+          - key: "{{ gates.trivy.status }}"
             operator: AnyIn
             value: ["clean", "accepted", "skipped"]
             message: "Trivy gate status is not in [clean, accepted, skipped]"
 
-          - key: "{{ predicate.gates.dast.status }}"
+          - key: "{{ gates.dast.status }}"
             operator: AnyIn
             value: ["clean", "accepted", "skipped"]
             message: "DAST gate status is not in [clean, accepted, skipped]"

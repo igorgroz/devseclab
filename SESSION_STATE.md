@@ -24,6 +24,20 @@ default stdout wrapper leaked tokens into `$(terraform output -raw …)`, append
 All previously uncommitted changes are now committed and pushed.
 
 ## Resolved this session (May 22 2026)
+- **Attestation condition JMESPath prefix bug.** Sig verify passed; attestation conditions
+  failed: `Unknown key "predicate"` resolving `predicate.gates.sast.status`. Kyverno exposes
+  the decoded predicate CONTENT at the JMESPath root, so the `key` fields must be
+  `gates.<tool>.status`, NOT `predicate.gates.<tool>.status`. Fixed all four keys in
+  `k8s/kyverno/clusterpolicy-image-verify.yaml` + corrected the misleading comment.
+  Predicate shape (from schema): predicate = {pipeline_run, reviewer, approved_at, gates:{sast,sca,trivy,dast}}.
+  NOT yet committed. Apply: `kubectl apply -f k8s/kyverno/clusterpolicy-image-verify.yaml`.
+- **annotate fix verified — Kyverno now enforcing.** Webhook correctly blocked backend
+  Deployment: image pinned to deploy commit SHA `a0e0ffb` (workflow-only commit, no image
+  in ECR) → MANIFEST_UNKNOWN. Root cause: "Pin image tags to deploy SHA" step defaulted to
+  `github.sha`, clobbering the checked-in signed pin `5af67ab43c90...`. Fixed: step now only
+  rewrites manifests when `image_tag` is provided; blank = keep checked-in (signed) pin.
+  NOT yet committed/pushed. Immediate unblock = dispatch deploy-lab with
+  image_tag=5af67ab43c9060b846cb71d16749fc427b63bb55.
 - **deploy-lab tf-output corruption → kubectl annotate failure** — three fixes in
   `.github/workflows/deploy-lab.yml`: (a) `terraform_wrapper: false` on setup-terraform so
   command-substitution captures aren't contaminated; (b) split out an ungated `Terraform
