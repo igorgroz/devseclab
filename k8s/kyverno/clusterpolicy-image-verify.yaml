@@ -153,22 +153,24 @@ spec:
 
         conditions:
         - all:
+          # Note: message fields do not have access to the predicate variable
+          # context in Kyverno 3.x — only the key field does. Static strings used.
           - key: "{{ predicate.gates.sast.status }}"
             operator: AnyIn
             value: ["clean", "accepted", "skipped"]
-            message: "SAST gate status '{{ predicate.gates.sast.status }}' is not allowed"
+            message: "SAST gate status is not in [clean, accepted, skipped]"
 
           - key: "{{ predicate.gates.sca.status }}"
             operator: AnyIn
             value: ["clean", "accepted", "skipped"]
-            message: "SCA gate status '{{ predicate.gates.sca.status }}' is not allowed"
+            message: "SCA gate status is not in [clean, accepted, skipped]"
 
           - key: "{{ predicate.gates.trivy.status }}"
             operator: AnyIn
             value: ["clean", "accepted", "skipped"]
-            message: "Trivy gate status '{{ predicate.gates.trivy.status }}' is not allowed"
+            message: "Trivy gate status is not in [clean, accepted, skipped]"
 
           - key: "{{ predicate.gates.dast.status }}"
             operator: AnyIn
             value: ["clean", "accepted", "skipped"]
-            message: "DAST gate status '{{ predicate.gates.dast.status }}' is not allowed"
+            message: "DAST gate status is not in [clean, accepted, skipped]"
