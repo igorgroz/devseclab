@@ -41,6 +41,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Pin image tags to deploy SHA
+        # Use inputs.image_tag if provided (rollback / specific signed image),
+        # otherwise default to github.sha (the commit that triggered this run).
+        # Either way, the manifests are rewritten once here before any kubectl
+        # apply — no second rollout needed.
+        run: |
+          SHA="${{ inputs.image_tag || github.sha }}"
+          sed -i "s|dsl-backend:[a-f0-9]\{40\}|dsl-backend:${SHA}|g" k8s/backend/deployment.yaml
+          sed -i "s|dsl-frontend:[a-f0-9]\{40\}|dsl-frontend:${SHA}|g" k8s/frontend/deployment.yaml
+          echo "Image tags pinned to ${SHA}"
+          grep -E 'image:.*dsl-(backend|frontend)' k8s/backend/deployment.yaml k8s/frontend/deployment.yaml
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -256,16 +268,6 @@ jobs:
           kubectl apply -f k8s/frontend/deployment.yaml
           kubectl -n dsl rollout status deployment/frontend --timeout=10m
 
-      - name: Optionally override backend and frontend image tags
-        if: ${{ inputs.image_tag != '' }}
-        run: |
-          ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
-          REGISTRY="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-          kubectl -n dsl set image deployment/backend  backend="${REGISTRY}/dsl-backend:${{ inputs.image_tag }}"
-          kubectl -n dsl set image deployment/frontend frontend="${REGISTRY}/dsl-frontend:${{ inputs.image_tag }}"
-          kubectl -n dsl rollout status deployment/backend --timeout=10m
-          kubectl -n dsl rollout status deployment/frontend --timeout=10m
-
       - name: Apply ingress
         run: |
           kubectl apply -f k8s/ingress.yaml
@@ -312,13 +314,10 @@ jobs:
             echo "- Region: \`${AWS_REGION}\`"
             echo "- Allowed CIDR: \`${{ inputs.allowed_cidr }}\`"
             echo "- ALB hostname: \`${{ steps.alb.outputs.hostname }}\`"
+            echo "- Image SHA: \`${{ inputs.image_tag || github.sha }}\`"
             echo ""
             echo "### Next manual step"
             echo "Update the GoDaddy CNAME for \`lab.oznetsecure.com.au\` to:"
             echo ""
             echo "\`${{ steps.alb.outputs.hostname }}\`"
-            if [ -n "${{ inputs.image_tag }}" ]; then
-              echo ""
-              echo "- Image tag override applied: \`${{ inputs.image_tag }}\`"
-            fi
           } >> "$GITHUB_STEP_SUMMARY"
