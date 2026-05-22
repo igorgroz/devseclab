@@ -42,15 +42,21 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Pin image tags to deploy SHA
-        # Use inputs.image_tag if provided (rollback / specific signed image),
-        # otherwise default to github.sha (the commit that triggered this run).
-        # Either way, the manifests are rewritten once here before any kubectl
-        # apply — no second rollout needed.
+        # If image_tag is provided, rewrite the manifests to that tag (rollback /
+        # promote a specific signed image). If it is blank, DO NOT rewrite — the
+        # checked-in manifests are already pinned to a known-good signed+attested
+        # SHA. Defaulting to github.sha was wrong: deploy-lab is usually dispatched
+        # on master HEAD, which is often a workflow/docs commit with no image built
+        # for it, so Kyverno (correctly) blocks the deploy with MANIFEST_UNKNOWN.
         run: |
-          SHA="${{ inputs.image_tag || github.sha }}"
-          sed -i "s|dsl-backend:[a-f0-9]\{40\}|dsl-backend:${SHA}|g" k8s/backend/deployment.yaml
-          sed -i "s|dsl-frontend:[a-f0-9]\{40\}|dsl-frontend:${SHA}|g" k8s/frontend/deployment.yaml
-          echo "Image tags pinned to ${SHA}"
+          SHA="${{ inputs.image_tag }}"
+          if [ -n "$SHA" ]; then
+            sed -i "s|dsl-backend:[a-f0-9]\{40\}|dsl-backend:${SHA}|g" k8s/backend/deployment.yaml
+            sed -i "s|dsl-frontend:[a-f0-9]\{40\}|dsl-frontend:${SHA}|g" k8s/frontend/deployment.yaml
+            echo "Image tags overridden to ${SHA}"
+          else
+            echo "No image_tag override; using checked-in manifest pins:"
+          fi
           grep -E 'image:.*dsl-(backend|frontend)' k8s/backend/deployment.yaml k8s/frontend/deployment.yaml
 
       - name: Configure AWS credentials

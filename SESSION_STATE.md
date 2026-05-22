@@ -64,8 +64,9 @@ All previously uncommitted changes are now committed and pushed.
 - Kyverno webhook TLS/caBundle stale cert issue — clean reinstall pattern in deploy-lab.
 
 ## Open issues
-1. **Positive admission test pending** — deploy-lab running; awaiting rollout success
-   confirmation for backend and frontend at `5af67ab`.
+1. **Positive admission test PASSED (May 22)** — backend + frontend admitted and Running at
+   `5af67ab` in ns `dsl` after the JMESPath prefix fix. Full chain verified: registry
+   allowlist → cosign signature → attestation conditions. Policy applied via direct kubectl.
 2. **ALBC vpcId pin** — hop_limit=1 prevents IMDS auto-discovery (pinned via TF output).
 3. **Identity/secrets hardening backlog**: GitHub Actions + nightly-destroy roles hold
    `AdministratorAccess`; GitHub OIDC `sub` is repo-wide; `AUTH_MODE=dast` HS256
