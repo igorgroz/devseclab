@@ -51,10 +51,57 @@ spec:
   # Temporarily Audit while ECR signing/attestation is wired up in the pipeline.
   # Switch back to Enforce once a new security-pipeline run has pushed
   # .sig/.att OCI artifacts into ECR for the current image SHA.
-  validationFailureAction: Audit
+  validationFailureAction: Enforce
   background: false   # only evaluate at admission time, not on existing resources
   rules:
 
+  # ---------------------------------------------------------------------------
+  # Rule 1 — Registry allowlist
+  #
+  # Rejects any Pod in the dsl namespace whose containers reference an image
+  # from an unapproved registry. This is a separate concern from signature
+  # verification: verifyImages only evaluates images that match its
+  # imageReferences patterns, so an image from Docker Hub or any other
+  # registry would pass straight through without being checked at all.
+  #
+  # This validate rule closes that gap by explicitly denying any image that
+  # does not originate from one of the three approved sources:
+  #   - ECR  (dsl-backend / dsl-frontend)
+  #   - GHCR (dsl-backend / dsl-frontend)
+  #   - Docker Hub postgres (db pod only)
+  #
+  # Together rules 1 and 2 form a complete supply-chain control:
+  #   Rule 1 → image must come from an approved registry
+  #   Rule 2 → image must be signed and attested by the pipeline
+  # ---------------------------------------------------------------------------
+  - name: restrict-image-registries
+    match:
+      any:
+      - resources:
+          kinds:
+          - Pod
+          namespaces:
+          - dsl
+    validate:
+      message: "Image is not from an approved registry. Allowed: ECR dsl-*, GHCR dsl-*, postgres:*."
+      foreach:
+      - list: "request.object.spec.containers"
+        deny:
+          conditions:
+            all:
+            - key: "{{ element.image }}"
+              operator: NotEquals
+              value: "510151297987.dkr.ecr.ap-southeast-2.amazonaws.com/dsl-*"
+            - key: "{{ element.image }}"
+              operator: NotEquals
+              value: "ghcr.io/igorgroz/dsl-*"
+            - key: "{{ element.image }}"
+              operator: NotEquals
+              value: "postgres:*"
+
+  # ---------------------------------------------------------------------------
+  # Rule 2 — Signature + attestation verification
+  # ---------------------------------------------------------------------------
   - name: verify-app-image-signature-and-attestation
     match:
       any:

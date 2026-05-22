@@ -9,18 +9,40 @@ Learning exercise — app has no practical value; all value is in DevSecOps and
 modern app security concepts built around it.
 
 ## Current phase
-**Kyverno admission enforcement — operational end-to-end.** Cluster UP.
-deploy-lab.yml runs clean with `run_terraform` checked: Terraform applies,
-Kyverno installs HA with IRSA wired to ECR, admission-controller pods carry
-AWS_ROLE_ARN + AWS_WEB_IDENTITY_TOKEN_FILE, backend + frontend roll out and
-pass cosign signature + vuln-signoff/v1 attestation verify on admission.
-ClusterPolicy still set to `Audit` (validationFailureAction). Next: flip to
-`Enforce` and validate end-to-end (signed image passes, unsigned rejected).
+**Kyverno Enforce mode + registry allowlist — partially validated.** Lab DOWN.
+ClusterPolicy flipped to `Enforce`. Registry allowlist rule (`restrict-image-registries`)
+added and confirmed blocking Docker Hub images (nginx:latest rejected). Signed ECR
+images still not completing positive admission test — rollout restart timed out with
+0/1 new replicas ready. Root cause suspected: `NotEquals` wildcard matching in the
+`foreach/deny` rule may not perform glob expansion, causing legitimate ECR images
+to match the deny conditions. Needs diagnostic on next startup.
 
 ## Last commit
-`fix(deploy-lab): apply Kyverno IRSA annotation via kubectl, not helm --set` (757ecd3)
-Uncommitted: 3 new docs (KYVERNO_ECR_VERIFY_FIX, KYVERNO_DEEP_DIVE,
-IDENTITY_TRUST_AND_SECRETS) + this SESSION_STATE update.
+`docs: add Kyverno + identity/secrets deep-dives; refresh SESSION_STATE` (b0b6db1)
+Code state last touched at 757ecd3 (Kyverno IRSA fix); everything since is docs.
+**Uncommitted changes**: `clusterpolicy-image-verify.yaml` (Enforce + registry rule),
+`k8s/backend/deployment.yaml`, `k8s/frontend/deployment.yaml` (both updated to SHA
+`b0b6db1`), `.github/workflows/security-pipeline.yml` (ECR digest fix for sign/attest).
+
+## Resolved this session (May 21–22 2026)
+- **ECR sign/attest digest mismatch fixed** in `security-pipeline.yml`. Root cause:
+  `docker pull ghcr → docker tag → docker push ecr` re-serialises the manifest JSON,
+  producing a different SHA-256 in ECR. Pipeline was signing ECR images using the GHCR
+  digest, so cosign stored `.sig` tagged `sha256-<ghcr-digest>.sig` in ECR, but Kyverno
+  looks for `sha256-<ecr-digest>.sig`. Fixed by querying actual ECR digest via
+  `aws ecr describe-images` after mirror push, then using that digest for all
+  cosign sign/attest/verify operations in ECR.
+- **Deployment manifests updated** — both backend and frontend updated from stale
+  `d90ba8a` to current pipeline SHA `b0b6db1`.
+- **ClusterPolicy flipped to Enforce** — `validationFailureAction: Audit → Enforce`.
+- **Registry allowlist rule added** (`restrict-image-registries`) — rejects any Pod
+  in `dsl` ns whose image doesn't match ECR dsl-*, GHCR dsl-*, or postgres:*. Fixed
+  a `foreach` variable scoping bug: `{{ element.image }}` is only valid inside the
+  foreach body, not at `validate.message` level — changed to static message string.
+- **Negative test passed** — `nginx:latest` from Docker Hub correctly rejected by
+  both the registry allowlist rule and (in earlier test) the verifyImages rule.
+- **Positive test incomplete** — rollout restart timed out (0/1 replicas updated).
+  Suspect `NotEquals` wildcard glob not expanding in deny conditions.
 
 ## Resolved this session (May 19 2026)
 - **Kyverno ECR verify chain fixed.** Real root cause: kyverno-admission-controller
@@ -48,36 +70,34 @@ IDENTITY_TRUST_AND_SECRETS) + this SESSION_STATE update.
   identity/trust/secrets map + risk review, built from a repo-wide audit).
 
 ## Open issues
-1. **ClusterPolicy still in Audit mode.** Flip back to `Enforce` after a clean
-   run, then redeploy backend/frontend to re-exercise admission. Add a
-   negative-test step: deploy an unsigned `nginx:latest` and confirm rejection.
-2. **ALBC vpcId pin** — hop_limit=1 prevents IMDS auto-discovery. Preferred fix:
-   cluster-info ConfigMap from Terraform VPC output.
-3. **ALB allowlist /32** — `bin/whitelist-me.sh` reduces toil.
-4. **Bitnami fallback risk** — chart upgrades may regress to `bitnami/kubectl`.
-   Pin the chart version explicitly and watch upstream for cleanupJobs image
-   structure changes.
-5. **Identity/secrets hardening backlog** (from IDENTITY_TRUST_AND_SECRETS.md
-   risk review): GitHub Actions + nightly-destroy roles hold `AdministratorAccess`;
-   GitHub OIDC `sub` is repo-wide (`repo:igorgroz/devseclab:*`); `AUTH_MODE=dast`
-   HS256 bypass ships in the prod image; public EKS endpoint; no KMS on etcd
-   Secrets; `dsl-eks-backend-role` IRSA is dormant; single Postgres superuser
-   doubles as app login.
+1. **Positive Kyverno admission test incomplete.** Rollout restart timed out — ECR
+   images (backend/frontend at `b0b6db1`) not being admitted. Probable cause:
+   `NotEquals` + wildcard pattern in `foreach/deny` not doing glob expansion. On
+   next startup: check events + policyreport messages to confirm, then fix the
+   matching operator (try `AnyNotIn` with a list, or restructure as `validate.pattern`
+   instead of `foreach/deny`).
+2. **Commit pending changes** — clusterpolicy, deployment manifests, security-pipeline
+   sign/attest fixes are all uncommitted.
+3. **ALBC vpcId pin** — hop_limit=1 prevents IMDS auto-discovery.
+4. **Identity/secrets hardening backlog**: GitHub Actions + nightly-destroy roles hold
+   `AdministratorAccess`; GitHub OIDC `sub` is repo-wide; `AUTH_MODE=dast` HS256
+   bypass ships in the prod image; public EKS endpoint; no KMS on etcd Secrets.
 
 ## Next actions — start of next session
-1. **Negative-test the policy**: `kubectl run nginx --image=nginx:latest -n dsl`
-   should be rejected. Confirm Kyverno blocks with a clean error.
-2. **Flip ClusterPolicy to Enforce**, redeploy, confirm continued success.
-3. **NetworkPolicies + PSS** on the `dsl` namespace.
-4. **Node-group hop-limit fix** — cluster-info ConfigMap, drop vpcId pin.
-5. **Enterprise platform track** — Kong, Istio mTLS, CloudFront + WAF.
-   Decision pending: build new microservices app or use reference workload
-   (Google Online Boutique / Weaveworks Sock Shop).
+1. **Diagnose rollout timeout**: `kubectl get events -n dsl --sort-by=.lastTimestamp | tail -20`
+   and `kubectl get policyreport -n dsl -o jsonpath='{range .items[*].results[*]}{.message}{"\n"}{end}'`
+2. **Fix registry allowlist wildcard matching** if `NotEquals` glob isn't expanding —
+   restructure the deny rule or switch to `AnyNotIn`.
+3. **Confirm positive test** — signed ECR images admitted, PASS in PolicyReport.
+4. **Commit all pending changes** with a descriptive message.
+5. **NetworkPolicies + PSS** on the `dsl` namespace.
+6. **IAM hardening** — narrow GitHub Actions role from AdministratorAccess.
 
 ## Lab state
-**UP.** EKS `dsl-eks` running with Kyverno 3.2.6 (HA, IRSA, 30s webhook
-timeout), backend + frontend rolled out at SHA `d90ba8a`, ClusterPolicy
-`dsl-verify-images` in Audit. Use `stoplab.sh` to tear down when done.
+**DOWN.** Torn down at end of May 21–22 session. Last known running state:
+Kyverno 3.2.6 HA IRSA, ClusterPolicy `dsl-verify-images` in **Enforce** with
+registry allowlist rule. Backend/frontend at SHA `b0b6db1` but rollout restart
+was still pending (timed out). Restart with `bin/startlab.sh` or deploy-lab.yml.
 
 ## Key paths
 - Kyverno policy: `k8s/kyverno/clusterpolicy-image-verify.yaml`
@@ -97,7 +117,7 @@ timeout), backend + frontend rolled out at SHA `d90ba8a`, ClusterPolicy
 - Account `510151297987`, region `ap-southeast-2`
 - EKS cluster `dsl-eks` (v1.35.4, AL2023) — **UP**
 - ECR: `510151297987.dkr.ecr.ap-southeast-2.amazonaws.com/dsl-{backend,frontend}`
-- Running image SHA: `d90ba8a` (signed + attested in ECR + GHCR)
+- Running image SHA: `b0b6db1` (signed + attested in ECR + GHCR; pipeline run `228aacde` also signed)
 - IRSA: `dsl-eks-eso-role`, `dsl-backend-sa`, `dsl-eks-kyverno-ecr-read` (new)
 - Secrets (SM, authoritative): `dsl/backend/db-password`, `dsl/backend/jwt-secret`
   (state bucket still legacy `sqlinj-tfstate-*` — can't rename in place)
