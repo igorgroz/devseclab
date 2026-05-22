@@ -63,6 +63,12 @@ jobs:
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
+          # Disable the stdout wrapper. With it on, $(terraform output -raw X)
+          # captures the wrapper's extra tokens, contaminating values that are
+          # later passed to kubectl/helm (e.g. a stray word appended to an ARN
+          # made `kubectl annotate` fail with "all resources must be specified
+          # before annotation changes").
+          terraform_wrapper: false
 
       - name: Setup kubectl
         uses: azure/setup-kubectl@v4
@@ -72,11 +78,19 @@ jobs:
       - name: Setup Helm
         uses: azure/setup-helm@v4
 
+      # init always runs (it only configures the S3 backend; it is idempotent
+      # and makes no infra changes). `terraform output` needs an initialised
+      # backend, so this must NOT be gated behind run_terraform — otherwise a
+      # deploy-without-apply reads an uninitialised backend and every output
+      # comes back empty/garbage.
+      - name: Terraform init
+        working-directory: terraform/infra-lab
+        run: terraform init -input=false
+
       - name: Terraform apply
         if: ${{ inputs.run_terraform }}
         working-directory: terraform/infra-lab
         run: |
-          terraform init -input=false
           terraform plan -out=lab.tfplan -input=false
           terraform apply -input=false lab.tfplan
 
@@ -84,10 +98,20 @@ jobs:
         id: tf
         working-directory: terraform/infra-lab
         run: |
-          echo "vpc_id=$(terraform output -raw vpc_id)" >> "$GITHUB_OUTPUT"
-          echo "albc_role_arn=$(terraform output -raw alb_controller_role_arn)" >> "$GITHUB_OUTPUT"
-          echo "backend_role_arn=$(terraform output -raw backend_role_arn)" >> "$GITHUB_OUTPUT"
-          echo "kyverno_ecr_read_role_arn=$(terraform output -raw kyverno_ecr_read_role_arn)" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          emit() {
+            local key="$1" out="$2" val
+            val="$(terraform output -raw "$out")"
+            if [ -z "$val" ]; then
+              echo "::error::Terraform output '$out' is empty - backend not initialised or apply not run. Aborting before it corrupts a kubectl/helm arg."
+              exit 1
+            fi
+            echo "$key=$val" >> "$GITHUB_OUTPUT"
+          }
+          emit vpc_id vpc_id
+          emit albc_role_arn alb_controller_role_arn
+          emit backend_role_arn backend_role_arn
+          emit kyverno_ecr_read_role_arn kyverno_ecr_read_role_arn
 
       - name: Update kubeconfig
         run: |
@@ -182,8 +206,13 @@ jobs:
           # a projected service-account token. Without it, cosign in Kyverno
           # has no AWS credentials, the ECR /v2/ auth challenge loop hangs
           # waiting on IMDS, and the admission webhook times out.
+          KYVERNO_ROLE_ARN="${{ steps.tf.outputs.kyverno_ecr_read_role_arn }}"
+          case "$KYVERNO_ROLE_ARN" in
+            arn:aws:iam::*:role/*) ;;
+            *) echo "::error::kyverno_ecr_read_role_arn is not a valid IAM role ARN: '$KYVERNO_ROLE_ARN'"; exit 1 ;;
+          esac
           kubectl -n kyverno annotate sa kyverno-admission-controller \
-            eks.amazonaws.com/role-arn=${{ steps.tf.outputs.kyverno_ecr_read_role_arn }} \
+            "eks.amazonaws.com/role-arn=${KYVERNO_ROLE_ARN}" \
             --overwrite
 
           # Existing pods were admitted BEFORE the SA was annotated, so the
