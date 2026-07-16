@@ -15,24 +15,22 @@ verified end to end: registry allowlist → cosign signature → attestation
 conditions. Policy was applied via direct kubectl; app pods came up clean.
 
 ## Last commit
-`fc65c8c fix(kyverno): attestation keys use gates.* not predicate.*; deploy-lab
-keeps signed manifest pin unless image_tag given [skip ci]` — landed the
-JMESPath policy fix, the deploy-lab pin-step redesign, tf wrapper/init fixes,
-and ARN validation.
+`7f5b43c ci: security-pipeline paths-ignore to skip promotion/docs/infra
+pushes [skip ci]` — pushed to origin/master (Jul 16). Adds `paths-ignore`
+(k8s/**, helm/**, terraform/**, **/*.md, deploy-lab.yml) so manifest-bump/
+release commits don't retrigger the build pipeline.
 
-## ⚠️ Still uncommitted at handoff (continuing in a new chat)
-- `.github/workflows/security-pipeline.yml` — added `paths-ignore` (k8s/**,
-  helm/**, terraform/**, **/*.md, deploy-lab.yml) so manifest-bump/release
-  commits don't retrigger the build pipeline (breaks the promote→rebuild loop).
-- `SESSION_STATE.md` — this file.
-- `bin/stoplab.sh` — unrelated, was already dirty on entry.
+## Workflow note
+Commits/pushes and running lab start/stop scripts stay with Igor (his
+terminal, his SSH keys — this sandbox has no GitHub push access). Claude
+does the code edits; Igor commits and runs them.
 
-Suggested first move in the new chat:
-```
-git add .github/workflows/security-pipeline.yml SESSION_STATE.md
-git commit -m "ci: security-pipeline paths-ignore to skip promotion/docs/infra pushes [skip ci]"
-git push
-```
+## Still dirty
+- `helm/kyverno/values.yaml` — cleanup-jobs image/securityContext fix
+  (alpine/k8s + runAsUser 65532), see Open issue #1. Applied live to the
+  cluster, needs commit + push.
+- `bin/stoplab.sh` — mode-bit flip (100644→100755) only, no content change.
+  Leave for Igor to commit or discard at his discretion.
 
 ## Resolved this session (May 22 2026)
 - **annotate failure** (`all resources must be specified before annotation
@@ -58,26 +56,58 @@ git push
 - Kyverno webhook TLS/caBundle stale cert — clean reinstall pattern in deploy-lab.
 
 ## Open issues
-1. **Kyverno cleanup cronjobs CreateContainerConfigError** — appeared after the
-   `kubectl` image swap in `helm/kyverno/values.yaml`. Doesn't block admission but
-   cleanup/report reaping is broken. Investigate next.
+1. **Kyverno cleanup cronjobs CreateContainerConfigError — two-stage fix,
+   deployed to cluster Jul 16, end-to-end success NOT yet confirmed.**
+   Root cause: chart hardcodes `securityContext.runAsNonRoot: true` +
+   command `/bin/bash -c ...` (not overridable) on the 5 cleanup CronJobs.
+   - Stage 1 (`registry.k8s.io/kubectl:v1.30.0` + `runAsUser: 65532`)
+     fixed the runAsNonRoot CreateContainerConfigError, but that image has
+     **no shell** — failed with `exec: "/bin/bash": stat /bin/bash: no
+     such file or directory` (RunContainerError/StartError).
+   - Stage 2: swapped to `docker.io/alpine/k8s:1.30.14` (has bash +
+     kubectl, actively maintained, not Bitnami). Kept `runAsUser/
+     runAsGroup: 65532` (this image also defaults to root, no USER in its
+     Dockerfile). `helm upgrade` applied successfully — confirmed via
+     `kubectl get cronjob ... -o jsonpath='{...image}'` → shows
+     `docker.io/alpine/k8s:1.30.14` on the live CronJob spec.
+   - **Not yet confirmed**: no pod has actually completed with the new
+     image — session ended (AWS auto-stop) before a manual
+     `create job --from=cronjob/...` finished. Also unconfirmed whether
+     the IRSA annotation on `kyverno-admission-controller` SA survived
+     this helm upgrade (it survived the prior one; didn't re-check after
+     this one — check on next session before assuming cosign/ECR still
+     works).
+   - **First move next session**: `kubectl -n kyverno create job
+     --from=cronjob/kyverno-cleanup-admission-reports verify-1` and watch
+     it reach `Completed`. If it fails, check `describe pod` for a new
+     error class (possible candidates: read-only-root-fs write attempt,
+     `$HOME` unset for UID 65532 breaking kubectl's discovery cache —
+     usually non-fatal but worth ruling out).
+   - Full values change is in `helm/kyverno/values.yaml` (rationale
+     comments #5/#6 at the top of the file) — **NOT YET COMMITTED** (see
+     below). Applied live via `helm upgrade` but the working tree still
+     needs `git add`/`commit`/`push`.
 2. **ALBC vpcId pin** — hop_limit=1 blocks IMDS auto-discovery (pinned via TF output).
 3. **Identity/secrets hardening backlog**: GitHub Actions + nightly-destroy roles hold
    `AdministratorAccess`; OIDC `sub` repo-wide; `AUTH_MODE=dast` HS256 bypass ships in
    prod image; public EKS endpoint; no KMS on etcd Secrets.
 
 ## Next actions — start of next session
-1. **Commit + push** the uncommitted fixes above (`[skip ci]`); redeploy lab.
+1. **Restart lab** — Igor runs deploy-lab.yml (blank image_tag → checked-in
+   5af67ab pin). Fixes are pushed, nothing blocking this now.
 2. **Fix Kyverno cleanup cronjob image** in `helm/kyverno/values.yaml`.
 3. **NetworkPolicies + PSS** on the `dsl` namespace.
 4. **IAM hardening** — narrow GitHub Actions role; tighten OIDC `sub`.
 5. **Istio + Kong study** — deploy manually alongside the app, outside pipeline.
 
 ## Lab state
-**STOPPED by user (May 22).** Last live state: Kyverno 3.2.6 HA IRSA, ClusterPolicy
-`dsl-verify-images` Enforce (registry allowlist + attestation conditions, gates.*
-keys, static messages). backend/frontend ran at `5af67ab`. Restart via deploy-lab.yml
-(blank image_tag uses the checked-in 5af67ab pin) — commit the working-tree fixes first.
+**STOPPED (Jul 16, `bin/stoplab.sh` clean teardown — 64 resources
+destroyed, ahead of an AWS auto-stop job).** Restart via deploy-lab.yml
+(blank image_tag uses the checked-in 5af67ab pin). Kyverno cleanup-jobs
+fix (alpine/k8s + runAsUser 65532) is in `helm/kyverno/values.yaml`,
+uncommitted — will apply automatically on next Kyverno install via
+deploy-lab.yml since that does a clean `helm install` from the values
+file. Still needs the end-to-end pod-completion check (Open issue #1).
 
 ## Key paths
 - Kyverno policy: `k8s/kyverno/clusterpolicy-image-verify.yaml`

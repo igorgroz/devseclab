@@ -34,11 +34,31 @@
 #      replicas down simultaneously (drain, autoscaler, rolling node
 #      replacement).
 #
-#   5. cleanupJobs.*.image.repository: registry.k8s.io/kubectl
+#   5. cleanupJobs.*.image.repository: alpine/k8s
 #      The Kyverno chart defaults cleanup CronJobs to bitnami/kubectl on
 #      Docker Hub. Bitnami deprecated the legacy free images in mid-2025,
 #      so those tags 404 and the cleanup pods ImagePullBackOff forever.
-#      The k8s upstream image is the right replacement.
+#      First replacement attempt was registry.k8s.io/kubectl — wrong on two
+#      counts: it defaults to root (see #6), AND it ships no shell at all,
+#      while the chart's cleanup container command is hardcoded to
+#      `/bin/bash -c ...` (not overridable via values) — so it failed with
+#      `exec: "/bin/bash": stat /bin/bash: no such file or directory` the
+#      moment the runAsNonRoot issue below was fixed. alpine/k8s
+#      (github.com/alpine-docker/k8s) bundles kubectl + bash on Alpine,
+#      is actively maintained, and isn't behind Bitnami's paywall.
+#
+#   6. cleanupJobs.*.securityContext.runAsUser/runAsGroup: 65532
+#      alpine/k8s's default image user is root (UID 0) — no USER directive
+#      in its Dockerfile — unlike bitnami/kubectl which shipped a non-root
+#      user out of the box. The chart hardcodes
+#      securityContext.runAsNonRoot: true on these containers, so without
+#      an explicit non-root UID override the pods fail admission with
+#      CreateContainerConfigError ("container has runAsNonRoot and image
+#      will run as root") — this was silently broken for every 10-minute
+#      cleanup tick until diagnosed (see Open issues in SESSION_STATE.md,
+#      resolved 2026-07-16). 65532 is the conventional distroless/
+#      "nonroot" UID; kubectl and bash are installed world-executable by
+#      apk, so any non-zero UID works.
 #
 # WHAT'S NOT HERE
 #
@@ -79,31 +99,46 @@ cleanupController:
 reportsController:
   replicas: 1
 
-# Swap bitnami/kubectl (deprecated mid-2025) for the upstream k8s image
-# across every cleanup CronJob the chart ships.
+# Swap bitnami/kubectl (deprecated mid-2025) for alpine/k8s across every
+# cleanup CronJob the chart ships — see rationale #5/#6 above.
 cleanupJobs:
   admissionReports:
     image:
-      registry: registry.k8s.io
-      repository: kubectl
-      tag: v1.30.0
+      registry: docker.io
+      repository: alpine/k8s
+      tag: '1.30.14'
+    securityContext:
+      runAsUser: 65532
+      runAsGroup: 65532
   clusterAdmissionReports:
     image:
-      registry: registry.k8s.io
-      repository: kubectl
-      tag: v1.30.0
+      registry: docker.io
+      repository: alpine/k8s
+      tag: '1.30.14'
+    securityContext:
+      runAsUser: 65532
+      runAsGroup: 65532
   ephemeralReports:
     image:
-      registry: registry.k8s.io
-      repository: kubectl
-      tag: v1.30.0
+      registry: docker.io
+      repository: alpine/k8s
+      tag: '1.30.14'
+    securityContext:
+      runAsUser: 65532
+      runAsGroup: 65532
   clusterEphemeralReports:
     image:
-      registry: registry.k8s.io
-      repository: kubectl
-      tag: v1.30.0
+      registry: docker.io
+      repository: alpine/k8s
+      tag: '1.30.14'
+    securityContext:
+      runAsUser: 65532
+      runAsGroup: 65532
   updateRequests:
     image:
-      registry: registry.k8s.io
-      repository: kubectl
-      tag: v1.30.0
+      registry: docker.io
+      repository: alpine/k8s
+      tag: '1.30.14'
+    securityContext:
+      runAsUser: 65532
+      runAsGroup: 65532
