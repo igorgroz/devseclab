@@ -24,13 +24,13 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  FRONTEND_IMAGE: ghcr.io/${{ github.repository_owner }}/dsl-frontend
-  BACKEND_IMAGE: ghcr.io/${{ github.repository_owner }}/dsl-backend
+  FRONTEND_IMAGE: ghcr.io/${{ github.repository_owner }}/sqlinj-frontend
+  BACKEND_IMAGE: ghcr.io/${{ github.repository_owner }}/sqlinj-backend
   NODE_VERSION: '20'
   TRIVY_VERSION: 'v0.69.3'
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
   AWS_REGION: ${{ vars.AWS_REGION || 'ap-southeast-2' }}
-  CLUSTER_NAME: dsl-eks
+  CLUSTER_NAME: sqlinj-eks
 
 jobs:
 
@@ -801,67 +801,31 @@ jobs:
         run: |
           ECR="${{ steps.ecr-login.outputs.registry }}"
           if aws ecr describe-images \
-               --repository-name dsl-frontend \
+               --repository-name sqlinj-frontend \
                --image-ids imageTag=${{ github.sha }} \
                --region "${AWS_REGION}" >/dev/null 2>&1; then
-            echo "dsl-frontend:${{ github.sha }} already in ECR — skipping push"
+            echo "sqlinj-frontend:${{ github.sha }} already in ECR — skipping push"
           else
             docker pull ${{ env.FRONTEND_IMAGE }}@${{ steps.push-frontend.outputs.digest }}
             docker tag  ${{ env.FRONTEND_IMAGE }}@${{ steps.push-frontend.outputs.digest }} \
-                        "${ECR}/dsl-frontend:${{ github.sha }}"
-            docker push "${ECR}/dsl-frontend:${{ github.sha }}"
+                        "${ECR}/sqlinj-frontend:${{ github.sha }}"
+            docker push "${ECR}/sqlinj-frontend:${{ github.sha }}"
           fi
 
       - name: Mirror backend to ECR
         run: |
           ECR="${{ steps.ecr-login.outputs.registry }}"
           if aws ecr describe-images \
-               --repository-name dsl-backend \
+               --repository-name sqlinj-backend \
                --image-ids imageTag=${{ github.sha }} \
                --region "${AWS_REGION}" >/dev/null 2>&1; then
-            echo "dsl-backend:${{ github.sha }} already in ECR — skipping push"
+            echo "sqlinj-backend:${{ github.sha }} already in ECR — skipping push"
           else
             docker pull ${{ env.BACKEND_IMAGE }}@${{ steps.push-backend.outputs.digest }}
             docker tag  ${{ env.BACKEND_IMAGE }}@${{ steps.push-backend.outputs.digest }} \
-                        "${ECR}/dsl-backend:${{ github.sha }}"
-            docker push "${ECR}/dsl-backend:${{ github.sha }}"
+                        "${ECR}/sqlinj-backend:${{ github.sha }}"
+            docker push "${ECR}/sqlinj-backend:${{ github.sha }}"
           fi
-
-      - name: Sign backend image in ECR
-        # The mirror step copies image layers only — not the cosign .sig OCI
-        # artifact. Sign the ECR image directly so Kyverno can verify it when
-        # admitting pods that reference the ECR URI.
-        #
-        # IMPORTANT: we must sign using the ECR digest, NOT the GHCR digest
-        # from steps.push-backend.outputs.digest. Docker re-serialises the
-        # manifest JSON when pushing to ECR (field ordering, whitespace), which
-        # changes the SHA-256 and produces a different digest even though the
-        # image layers are identical. If we sign with the GHCR digest, cosign
-        # stores the .sig in ECR tagged sha256-<ghcr-digest>.sig — but Kyverno
-        # resolves the ECR image to its ECR digest and looks for
-        # sha256-<ecr-digest>.sig, finding nothing and failing verification.
-        run: |
-          ECR="${{ steps.ecr-login.outputs.registry }}"
-          ECR_DIGEST=$(aws ecr describe-images \
-            --repository-name dsl-backend \
-            --image-ids imageTag=${{ github.sha }} \
-            --region "${AWS_REGION}" \
-            --query 'imageDetails[0].imageDigest' \
-            --output text)
-          echo "ECR backend digest: ${ECR_DIGEST}"
-          cosign sign --yes "${ECR}/dsl-backend@${ECR_DIGEST}"
-
-      - name: Sign frontend image in ECR
-        run: |
-          ECR="${{ steps.ecr-login.outputs.registry }}"
-          ECR_DIGEST=$(aws ecr describe-images \
-            --repository-name dsl-frontend \
-            --image-ids imageTag=${{ github.sha }} \
-            --region "${AWS_REGION}" \
-            --query 'imageDetails[0].imageDigest' \
-            --output text)
-          echo "ECR frontend digest: ${ECR_DIGEST}"
-          cosign sign --yes "${ECR}/dsl-frontend@${ECR_DIGEST}"
 
 # ══════════════════════════════════════════════════════════════════
 # JOB 6 — DAST: OWASP ZAP
@@ -916,7 +880,7 @@ jobs:
           mkdir -p artifacts/zap-api
 
           DAST_TOKEN="$(
-            docker exec dsl-backend node -e '
+            docker exec sqlinj-backend node -e '
               const jwt = require("jsonwebtoken");
               process.stdout.write(
                 jwt.sign(
@@ -1421,90 +1385,6 @@ jobs:
 
           echo "vuln-signoff/v1 attestation verified on both image digests."
 
-      - name: Configure AWS credentials (ECR attestation)
-        # The mirror step in push-and-sign copies image layers only, not the
-        # cosign .att OCI artifact. Attest the ECR images directly so Kyverno
-        # can verify the attestation predicate when admitting pods that reference
-        # the ECR URI rather than the GHCR URI.
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_GITHUB_ACTIONS_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Log in to ECR
-        id: ecr-login-attest
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Attest backend image in ECR
-        # Use the actual ECR digest, not the GHCR digest. Docker re-serialises
-        # the manifest when mirroring, producing a different SHA-256 digest in
-        # ECR. cosign attest must reference the ECR digest so the .att artifact
-        # is stored under sha256-<ecr-digest>.att — which is what Kyverno looks
-        # for when verifying pods that reference the ECR image URI.
-        env:
-          PREDICATE_TYPE: https://oznetsecure.com.au/attestations/vuln-signoff/v1
-        run: |
-          ECR="${{ steps.ecr-login-attest.outputs.registry }}"
-          ECR_DIGEST=$(aws ecr describe-images \
-            --repository-name dsl-backend \
-            --image-ids imageTag=${{ github.sha }} \
-            --region "${AWS_REGION}" \
-            --query 'imageDetails[0].imageDigest' \
-            --output text)
-          echo "ECR backend digest: ${ECR_DIGEST}"
-          cosign attest --yes \
-            --type "${PREDICATE_TYPE}" \
-            --predicate predicate.json \
-            "${ECR}/dsl-backend@${ECR_DIGEST}"
-
-      - name: Attest frontend image in ECR
-        env:
-          PREDICATE_TYPE: https://oznetsecure.com.au/attestations/vuln-signoff/v1
-        run: |
-          ECR="${{ steps.ecr-login-attest.outputs.registry }}"
-          ECR_DIGEST=$(aws ecr describe-images \
-            --repository-name dsl-frontend \
-            --image-ids imageTag=${{ github.sha }} \
-            --region "${AWS_REGION}" \
-            --query 'imageDetails[0].imageDigest' \
-            --output text)
-          echo "ECR frontend digest: ${ECR_DIGEST}"
-          cosign attest --yes \
-            --type "${PREDICATE_TYPE}" \
-            --predicate predicate.json \
-            "${ECR}/dsl-frontend@${ECR_DIGEST}"
-
-      - name: Verify ECR attestations
-        env:
-          PREDICATE_TYPE: https://oznetsecure.com.au/attestations/vuln-signoff/v1
-        run: |
-          ECR="${{ steps.ecr-login-attest.outputs.registry }}"
-          BACKEND_ECR_DIGEST=$(aws ecr describe-images \
-            --repository-name dsl-backend \
-            --image-ids imageTag=${{ github.sha }} \
-            --region "${AWS_REGION}" \
-            --query 'imageDetails[0].imageDigest' \
-            --output text)
-          FRONTEND_ECR_DIGEST=$(aws ecr describe-images \
-            --repository-name dsl-frontend \
-            --image-ids imageTag=${{ github.sha }} \
-            --region "${AWS_REGION}" \
-            --query 'imageDetails[0].imageDigest' \
-            --output text)
-          cosign verify-attestation \
-            --type "${PREDICATE_TYPE}" \
-            --certificate-identity-regexp="https://github.com/${{ github.repository }}/.github/workflows/.*" \
-            --certificate-oidc-issuer="https://token.actions.githubusercontent.com" \
-            "${ECR}/dsl-backend@${BACKEND_ECR_DIGEST}" \
-            > /dev/null
-          cosign verify-attestation \
-            --type "${PREDICATE_TYPE}" \
-            --certificate-identity-regexp="https://github.com/${{ github.repository }}/.github/workflows/.*" \
-            --certificate-oidc-issuer="https://token.actions.githubusercontent.com" \
-            "${ECR}/dsl-frontend@${FRONTEND_ECR_DIGEST}" \
-            > /dev/null
-          echo "vuln-signoff/v1 attestation verified on both ECR image digests."
-
 # ══════════════════════════════════════════════════════════════════
 # JOB 9 — Deploy to EKS
 #
@@ -1543,41 +1423,36 @@ jobs:
         env:
           ECR_REGISTRY: ${{ needs.push-and-sign.outputs.ecr-registry }}
         run: |
-          if ! kubectl -n dsl get deployment backend --request-timeout=10s >/dev/null 2>&1; then
-            echo "::warning::backend deployment not found in dsl namespace — workloads not provisioned yet. Run deploy-lab.yml first."
-            exit 0
-          fi
-          kubectl -n dsl set image deployment/backend \
-            backend="${ECR_REGISTRY}/dsl-backend:${{ github.sha }}"
-          kubectl -n dsl rollout status deployment/backend --timeout=10m
+          kubectl -n sqlinj set image deployment/backend \
+            backend="${ECR_REGISTRY}/sqlinj-backend:${{ github.sha }}"
+          kubectl -n sqlinj rollout status deployment/backend --timeout=10m
 
       - name: Update frontend image
         if: steps.cluster_check.outputs.reachable == 'true'
         env:
           ECR_REGISTRY: ${{ needs.push-and-sign.outputs.ecr-registry }}
         run: |
-          if ! kubectl -n dsl get deployment frontend --request-timeout=10s >/dev/null 2>&1; then
-            echo "::warning::frontend deployment not found in dsl namespace — workloads not provisioned yet. Run deploy-lab.yml first."
+          kubectl -n sqlinj set image deployment/frontend \
+            frontend="${ECR_REGISTRY}/sqlinj-frontend:${{ github.sha }}"
+          kubectl -n sqlinj rollout status deployment/frontend --timeout=10m
+
+      - name: Smoke test
+        if: steps.cluster_check.outputs.reachable == 'true'
+        run: |
+          ALB="$(kubectl -n sqlinj get ingress sqlinj-ingress \
+            -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)"
+          if [ -z "${ALB}" ]; then
+            echo "::warning::No ALB hostname found — skipping smoke test"
             exit 0
           fi
-          kubectl -n dsl set image deployment/frontend \
-            frontend="${ECR_REGISTRY}/dsl-frontend:${{ github.sha }}"
-          kubectl -n dsl rollout status deployment/frontend --timeout=10m
-
-      - name: Smoke test backend health (via kubectl port-forward)
-        if: steps.cluster_check.outputs.reachable == 'true'
-        # ALB inbound-cidrs is locked to the operator's IP — runner can't reach
-        # it externally. Port-forward directly to the backend service instead.
-        run: |
-          kubectl -n dsl port-forward svc/backend 18080:5001 &
-          PF_PID=$!
-          sleep 5
-          if curl -fsS http://localhost:18080/health >/dev/null; then
-            echo "Backend health check passed"
-          else
-            echo "::warning::Backend health check did not return 200 — check pod logs"
-          fi
-          kill $PF_PID 2>/dev/null || true
+          for i in $(seq 1 12); do
+            if curl -kfsS "https://${ALB}/health" >/dev/null; then
+              echo "Smoke test passed: https://${ALB}/health"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::warning::Smoke test did not pass within timeout — check ALB health"
 
       - name: Summarise deploy
         if: always()
@@ -1590,8 +1465,8 @@ jobs:
             echo "- Commit: \`${{ github.sha }}\`"
             echo "- Cluster reachable: \`${REACHABLE}\`"
             if [ "${REACHABLE}" = "true" ]; then
-              echo "- Backend:  \`${ECR}/dsl-backend:${{ github.sha }}\`"
-              echo "- Frontend: \`${ECR}/dsl-frontend:${{ github.sha }}\`"
+              echo "- Backend:  \`${ECR}/sqlinj-backend:${{ github.sha }}\`"
+              echo "- Frontend: \`${ECR}/sqlinj-frontend:${{ github.sha }}\`"
             else
               echo ""
               echo "> Cluster was down at deploy time."
