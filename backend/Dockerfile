@@ -1,6 +1,7 @@
-# Use Node.js 20 LTS on Alpine — smaller surface area, actively supported.
-# node:18 reached EOL April 2025 and carries HIGH/CRITICAL CVEs in Trivy.
-FROM node:20-alpine
+# Use Node.js 24 (Active LTS) on Alpine — smaller surface area, actively supported.
+# node:20 reached EOL 2026-04-30; npm@latest now refuses to install on it
+# (engine requires ^22.22.2 || ^24.15.0 || >=26.0.0), which broke this build.
+FROM node:24-alpine
 
 # Set the working directory inside the container
 WORKDIR /app
@@ -46,7 +47,7 @@ COPY --chown=node:node . .
 # Expose the port your backend runs on (5001)
 EXPOSE 5001
 
-# Switch to non-root user — node:20-alpine image includes this user at UID 1000
+# Switch to non-root user — node:24-alpine image includes this user at UID 1000
 USER node
 
 # Command to start your backend

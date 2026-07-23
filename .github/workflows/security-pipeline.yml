@@ -10,6 +10,11 @@ name: Security Pipeline
 on:
   push:
     branches: [master, main]
+    paths-ignore:
+      - '**.md'
+      - 'k8s/**'
+      - 'helm/**'
+      - 'terraform/**'
   pull_request:
     branches: [master, main]
   schedule:
@@ -24,13 +29,13 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  FRONTEND_IMAGE: ghcr.io/${{ github.repository_owner }}/sqlinj-frontend
-  BACKEND_IMAGE: ghcr.io/${{ github.repository_owner }}/sqlinj-backend
-  NODE_VERSION: '20'
+  FRONTEND_IMAGE: ghcr.io/${{ github.repository_owner }}/dsl-frontend
+  BACKEND_IMAGE: ghcr.io/${{ github.repository_owner }}/dsl-backend
+  NODE_VERSION: '24'
   TRIVY_VERSION: 'v0.69.3'
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
   AWS_REGION: ${{ vars.AWS_REGION || 'ap-southeast-2' }}
-  CLUSTER_NAME: sqlinj-eks
+  CLUSTER_NAME: dsl-eks
 
 jobs:
 
@@ -801,30 +806,30 @@ jobs:
         run: |
           ECR="${{ steps.ecr-login.outputs.registry }}"
           if aws ecr describe-images \
-               --repository-name sqlinj-frontend \
+               --repository-name dsl-frontend \
                --image-ids imageTag=${{ github.sha }} \
                --region "${AWS_REGION}" >/dev/null 2>&1; then
-            echo "sqlinj-frontend:${{ github.sha }} already in ECR — skipping push"
+            echo "dsl-frontend:${{ github.sha }} already in ECR — skipping push"
           else
             docker pull ${{ env.FRONTEND_IMAGE }}@${{ steps.push-frontend.outputs.digest }}
             docker tag  ${{ env.FRONTEND_IMAGE }}@${{ steps.push-frontend.outputs.digest }} \
-                        "${ECR}/sqlinj-frontend:${{ github.sha }}"
-            docker push "${ECR}/sqlinj-frontend:${{ github.sha }}"
+                        "${ECR}/dsl-frontend:${{ github.sha }}"
+            docker push "${ECR}/dsl-frontend:${{ github.sha }}"
           fi
 
       - name: Mirror backend to ECR
         run: |
           ECR="${{ steps.ecr-login.outputs.registry }}"
           if aws ecr describe-images \
-               --repository-name sqlinj-backend \
+               --repository-name dsl-backend \
                --image-ids imageTag=${{ github.sha }} \
                --region "${AWS_REGION}" >/dev/null 2>&1; then
-            echo "sqlinj-backend:${{ github.sha }} already in ECR — skipping push"
+            echo "dsl-backend:${{ github.sha }} already in ECR — skipping push"
           else
             docker pull ${{ env.BACKEND_IMAGE }}@${{ steps.push-backend.outputs.digest }}
             docker tag  ${{ env.BACKEND_IMAGE }}@${{ steps.push-backend.outputs.digest }} \
-                        "${ECR}/sqlinj-backend:${{ github.sha }}"
-            docker push "${ECR}/sqlinj-backend:${{ github.sha }}"
+                        "${ECR}/dsl-backend:${{ github.sha }}"
+            docker push "${ECR}/dsl-backend:${{ github.sha }}"
           fi
 
 # ══════════════════════════════════════════════════════════════════
@@ -880,7 +885,7 @@ jobs:
           mkdir -p artifacts/zap-api
 
           DAST_TOKEN="$(
-            docker exec sqlinj-backend node -e '
+            docker exec dsl-backend node -e '
               const jwt = require("jsonwebtoken");
               process.stdout.write(
                 jwt.sign(
@@ -1423,23 +1428,23 @@ jobs:
         env:
           ECR_REGISTRY: ${{ needs.push-and-sign.outputs.ecr-registry }}
         run: |
-          kubectl -n sqlinj set image deployment/backend \
-            backend="${ECR_REGISTRY}/sqlinj-backend:${{ github.sha }}"
-          kubectl -n sqlinj rollout status deployment/backend --timeout=10m
+          kubectl -n dsl set image deployment/backend \
+            backend="${ECR_REGISTRY}/dsl-backend:${{ github.sha }}"
+          kubectl -n dsl rollout status deployment/backend --timeout=10m
 
       - name: Update frontend image
         if: steps.cluster_check.outputs.reachable == 'true'
         env:
           ECR_REGISTRY: ${{ needs.push-and-sign.outputs.ecr-registry }}
         run: |
-          kubectl -n sqlinj set image deployment/frontend \
-            frontend="${ECR_REGISTRY}/sqlinj-frontend:${{ github.sha }}"
-          kubectl -n sqlinj rollout status deployment/frontend --timeout=10m
+          kubectl -n dsl set image deployment/frontend \
+            frontend="${ECR_REGISTRY}/dsl-frontend:${{ github.sha }}"
+          kubectl -n dsl rollout status deployment/frontend --timeout=10m
 
       - name: Smoke test
         if: steps.cluster_check.outputs.reachable == 'true'
         run: |
-          ALB="$(kubectl -n sqlinj get ingress sqlinj-ingress \
+          ALB="$(kubectl -n dsl get ingress dsl-ingress \
             -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)"
           if [ -z "${ALB}" ]; then
             echo "::warning::No ALB hostname found — skipping smoke test"
@@ -1465,8 +1470,8 @@ jobs:
             echo "- Commit: \`${{ github.sha }}\`"
             echo "- Cluster reachable: \`${REACHABLE}\`"
             if [ "${REACHABLE}" = "true" ]; then
-              echo "- Backend:  \`${ECR}/sqlinj-backend:${{ github.sha }}\`"
-              echo "- Frontend: \`${ECR}/sqlinj-frontend:${{ github.sha }}\`"
+              echo "- Backend:  \`${ECR}/dsl-backend:${{ github.sha }}\`"
+              echo "- Frontend: \`${ECR}/dsl-frontend:${{ github.sha }}\`"
             else
               echo ""
               echo "> Cluster was down at deploy time."

@@ -1,5 +1,7 @@
 # Stage 1: Build the React app
-FROM node:20-alpine AS builder
+# node:20 reached EOL 2026-04-30 — moved to 24 (Active LTS) to match backend
+# and stay ahead of npm/toolchain engine bumps that assume a supported Node.
+FROM node:24-alpine AS builder
 
 WORKDIR /app
 

@@ -23,37 +23,46 @@ Commits/pushes and running lab start/stop scripts stay with Igor (his
 terminal, his SSH keys — the Claude sandbox has no GitHub push access).
 Claude does the code edits; Igor commits and runs them.
 
-## Still dirty
-- `bin/stoplab.sh` — mode-bit flip (100644→100755) only, no content change.
+## Still dirty (uncommitted, Jul 23)
+- `bin/stoplab.sh` — mode-bit flip only, no content change.
+- `backend/Dockerfile`, `frontend/Dockerfile` — `node:20-alpine` →
+  `node:24-alpine`. Node 20 hit EOL 2026-04-30; `npm@latest` refuses to
+  install on it (engine requires `^22.22.2||^24.15.0||>=26`), broke the build.
+- `.github/workflows/security-pipeline.yml` — added real `paths-ignore`
+  (`**.md`, `k8s/**`, `helm/**`, `terraform/**`); reverted stray `sqlinj-*`
+  naming back to `dsl-*` everywhere (image env vars, ECR repo names,
+  `CLUSTER_NAME`, `kubectl -n`, ingress, DAST container exec) — confirmed
+  `dsl-*` against terraform/`k8s/*.yaml`. `NODE_VERSION` `'20'`→`'24'`.
+  Root cause: commit `7f5b43c` claimed to add `paths-ignore` but its diff
+  only did the `sqlinj-*` rename — trigger block was never touched.
 
 ## Open issues
 1. **Kyverno cleanup cronjob fix committed (`79b310c`) but NOT
    runtime-verified.** Chain: chart hardcodes `runAsNonRoot: true` + command
    `/bin/bash -c ...` (not overridable) on all 5 cleanup CronJobs.
-   `registry.k8s.io/kubectl` fixed the root-UID issue but has no shell
-   (`exec: "/bin/bash": stat /bin/bash: no such file or directory`) →
-   swapped to `docker.io/alpine/k8s:1.30.14` (has bash, no USER directive
-   either, kept `runAsUser/runAsGroup: 65532`). Spec confirmed applied to
-   the live CronJob before teardown; no pod has actually reached
-   `Completed` yet. **First move next session**:
+   `registry.k8s.io/kubectl` fixed the root-UID issue but has no shell →
+   swapped to `docker.io/alpine/k8s:1.30.14` (has bash, kept
+   `runAsUser/runAsGroup: 65532`). Spec applied before teardown; no pod has
+   reached `Completed` yet. **First move next session**:
    - Check `kyverno-admission-controller` SA still has the IRSA role-arn
-     annotation (unconfirmed since the last `helm upgrade`, which also left
-     the release in `failed` state on a post-upgrade-hook timeout — moot
-     after a fresh `deploy-lab.yml` install).
+     annotation (unconfirmed since the last `helm upgrade`, which left the
+     release in `failed` state on a post-upgrade-hook timeout — moot after a
+     fresh `deploy-lab.yml` install).
    - `kubectl -n kyverno create job --from=cronjob/kyverno-cleanup-admission-reports verify-1`
-     → watch for `Completed`. If it still fails, check for read-only-rootfs
+     → watch for `Completed`. If it still fails, check read-only-rootfs
      writes or `$HOME` issues under UID 65532.
-2. **Confirm `paths-ignore` held** — check GitHub Actions that
-   `security-pipeline` did NOT fire on `79b310c` (manifest/helm-only commit).
+2. **Verify new `paths-ignore` actually skips docs-only pushes** — untested,
+   just added (see Still dirty).
 3. **ALBC vpcId pin** — hop_limit=1 blocks IMDS auto-discovery (pinned via TF output).
 4. **Identity/secrets hardening backlog**: GitHub Actions + nightly-destroy roles hold
    `AdministratorAccess`; OIDC `sub` repo-wide; `AUTH_MODE=dast` HS256 bypass ships in
    prod image; public EKS endpoint; no KMS on etcd Secrets.
 
 ## Next actions — start of next session
-1. **Restart lab** via deploy-lab.yml (blank image_tag → checked-in 5af67ab pin).
-2. **Verify Kyverno cleanup cronjob fix end-to-end** (Open issue #1).
-3. **Confirm `paths-ignore` held** (Open issue #2).
+1. **Commit + push CI fixes** (Dockerfiles, workflow) — first push exercises
+   both the Node 24 build and the new `paths-ignore`.
+2. **Restart lab** via deploy-lab.yml (blank image_tag → checked-in 5af67ab pin).
+3. **Verify Kyverno cleanup cronjob fix end-to-end** (Open issue #1).
 4. **NetworkPolicies + PSS** on the `dsl` namespace.
 5. **IAM hardening** — narrow GitHub Actions role; tighten OIDC `sub`.
 6. **Istio + Kong study** — deploy manually alongside the app, outside pipeline.
