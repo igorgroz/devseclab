@@ -62,6 +62,15 @@ resource "aws_ecr_repository" "repos" {
 # In a production registry with semver tags, you'd add rules to keep all
 # semver-tagged images regardless of count (for rollback safety) and only
 # apply the count limit to non-semver tags like branch names.
+#
+# NOTE (2026-07-23): rule 2 originally scoped itself with tagPrefixList =
+# ["v", "sha-"], anticipating tags like "v1.2.3" or "sha-abc1234". The
+# actual pipeline tags images with the bare 40-char git SHA (github.sha,
+# no prefix) plus "latest" — neither matches "v" or "sha-", so the count
+# rule silently matched zero images and never pruned anything (49 images
+# had accumulated in dsl-backend before this was caught). tagPatternList
+# with a "*" glob matches on tagStatus alone regardless of literal prefix,
+# which is what actually needed here.
 
 resource "aws_ecr_lifecycle_policy" "repos" {
   for_each   = aws_ecr_repository.repos
@@ -84,10 +93,10 @@ resource "aws_ecr_lifecycle_policy" "repos" {
         rulePriority = 2
         description  = "Keep only the ${var.lifecycle_tagged_count} most recent tagged images"
         selection = {
-          tagStatus   = "tagged"
-          tagPrefixList = ["v", "sha-"]   # matches semver (v1.2.3) and SHA tags (sha-abc1234)
-          countType   = "imageCountMoreThan"
-          countNumber = var.lifecycle_tagged_count
+          tagStatus     = "tagged"
+          tagPatternList = ["*"]   # any tag — real tags are bare git SHAs + "latest", no fixed prefix
+          countType     = "imageCountMoreThan"
+          countNumber   = var.lifecycle_tagged_count
         }
         action = { type = "expire" }
       }
