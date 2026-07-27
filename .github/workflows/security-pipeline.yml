@@ -1452,6 +1452,35 @@ jobs:
 
           echo "ECR copy carries a valid signature and vuln-signoff/v1 attestation on both digests."
 
+      - name: Print image details
+        # This is the single source of truth for "what do I deploy." No
+        # other workflow or checked-in file should be treated as a pin —
+        # always copy the tag from here into deploy-lab.yml's image_tag.
+        run: |
+          {
+            echo "## Image built by this run"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Tag (use as \`image_tag\`) | \`${{ github.sha }}\` |"
+            echo "| Frontend digest | \`${{ needs.push-and-sign.outputs.frontend-digest }}\` |"
+            echo "| Backend digest | \`${{ needs.push-and-sign.outputs.backend-digest }}\` |"
+            echo "| ECR frontend | \`${{ steps.ecr-login.outputs.registry }}/dsl-frontend:${{ github.sha }}\` |"
+            echo "| ECR backend | \`${{ steps.ecr-login.outputs.registry }}/dsl-backend:${{ github.sha }}\` |"
+            echo ""
+            echo "### Deploy this build"
+            echo '```'
+            echo "gh workflow run deploy-lab.yml \\"
+            echo "  -f allowed_cidr=\"\$(curl -s https://icanhazip.com)/32\" \\"
+            echo "  -f image_tag=\"${{ github.sha }}\" \\"
+            echo "  -f run_terraform=true"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "Image tag: ${{ github.sha }}"
+          echo "Frontend digest: ${{ needs.push-and-sign.outputs.frontend-digest }}"
+          echo "Backend digest: ${{ needs.push-and-sign.outputs.backend-digest }}"
+
 # ══════════════════════════════════════════════════════════════════
 # JOB 9 — Deploy to EKS
 #

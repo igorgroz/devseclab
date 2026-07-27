@@ -341,15 +341,19 @@ data "aws_iam_policy_document" "github_actions_assume" {
       values   = ["sts.amazonaws.com"]
     }
 
-    # Scope to this repo only. The wildcard suffix covers all sub-claim formats:
-    #   push:               repo:igorgroz/devseclab:ref:refs/heads/master
-    #   workflow_dispatch:  repo:igorgroz/devseclab:ref:refs/heads/master
-    #   environment-gated:  repo:igorgroz/devseclab:environment:lab
-    # Production: tighten to specific branch + environment claims.
+    # Scoped to the exact sub-claim formats the AWS-assuming jobs actually run
+    # under (push-and-sign/attest/deploy gate on refs/heads/master|main; the
+    # deploy jobs additionally run under the `lab` GitHub environment).
+    # No pull_request-triggered job assumes this role, so fork PRs never
+    # present a matching sub claim.
     condition {
-      test     = "StringLike"
+      test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:igorgroz/devseclab:*"]
+      values = [
+        "repo:igorgroz/devseclab:ref:refs/heads/master",
+        "repo:igorgroz/devseclab:ref:refs/heads/main",
+        "repo:igorgroz/devseclab:environment:lab",
+      ]
     }
   }
 }
