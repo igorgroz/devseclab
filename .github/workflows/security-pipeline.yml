@@ -815,10 +815,18 @@ jobs:
             ${{ env.BACKEND_IMAGE }}@${{ steps.push-backend.outputs.digest }}
 
       - name: Mirror frontend to ECR
-        # Pull the exact digest we just signed so the ECR tag carries
-        # the same content-addressed manifest. Digest equality means
-        # cosign's Rekor entry is valid regardless of which registry
-        # the image is later pulled from.
+        # Deliberately NOT `docker pull` + `docker tag` + `docker push`.
+        # That pattern round-trips the manifest through the local Docker
+        # engine, which re-serializes it on push — same layers, different
+        # manifest bytes, different digest. Confirmed in practice: GHCR
+        # digest X went in, ECR reported a different digest Y for the
+        # "same" push. Since cosign signed X, Kyverno's imageVerify (which
+        # resolves the ECR tag to whatever digest is actually there) then
+        # fails with "no signatures found" for Y — a real signature exists,
+        # just not for the digest the tag ended up pointing to.
+        # `docker buildx imagetools create` copies the manifest directly via
+        # registry API, no local re-serialization, so the ECR tag ends up
+        # pointing at the exact same digest that was signed.
         # Note: ECR repos are IMMUTABLE — skip push if tag already exists.
         run: |
           ECR="${{ steps.ecr-login.outputs.registry }}"
@@ -828,13 +836,14 @@ jobs:
                --region "${AWS_REGION}" >/dev/null 2>&1; then
             echo "dsl-frontend:${{ github.sha }} already in ECR — skipping push"
           else
-            docker pull ${{ env.FRONTEND_IMAGE }}@${{ steps.push-frontend.outputs.digest }}
-            docker tag  ${{ env.FRONTEND_IMAGE }}@${{ steps.push-frontend.outputs.digest }} \
-                        "${ECR}/dsl-frontend:${{ github.sha }}"
-            docker push "${ECR}/dsl-frontend:${{ github.sha }}"
+            docker buildx imagetools create \
+              --tag "${ECR}/dsl-frontend:${{ github.sha }}" \
+              ${{ env.FRONTEND_IMAGE }}@${{ steps.push-frontend.outputs.digest }}
           fi
 
       - name: Mirror backend to ECR
+        # See "Mirror frontend to ECR" above — same digest-preservation
+        # rationale.
         run: |
           ECR="${{ steps.ecr-login.outputs.registry }}"
           if aws ecr describe-images \
@@ -843,10 +852,9 @@ jobs:
                --region "${AWS_REGION}" >/dev/null 2>&1; then
             echo "dsl-backend:${{ github.sha }} already in ECR — skipping push"
           else
-            docker pull ${{ env.BACKEND_IMAGE }}@${{ steps.push-backend.outputs.digest }}
-            docker tag  ${{ env.BACKEND_IMAGE }}@${{ steps.push-backend.outputs.digest }} \
-                        "${ECR}/dsl-backend:${{ github.sha }}"
-            docker push "${ECR}/dsl-backend:${{ github.sha }}"
+            docker buildx imagetools create \
+              --tag "${ECR}/dsl-backend:${{ github.sha }}" \
+              ${{ env.BACKEND_IMAGE }}@${{ steps.push-backend.outputs.digest }}
           fi
 
 # ══════════════════════════════════════════════════════════════════
