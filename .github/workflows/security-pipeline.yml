@@ -2,10 +2,12 @@ name: Security Pipeline
 
 # ──────────────────────────────────────────────────────────────────
 # Trigger strategy:
-#   PRs       → SAST + SCA (fast gates, fail fast before merge)
-#   push main → full pipeline: SAST → SCA → build → Trivy → push →
-#               Cosign sign → DAST
-#   schedule  → weekly SCA re-run to catch newly published CVEs
+#   PRs               → SAST + SCA (fast gates, fail fast before merge)
+#   push main         → full pipeline: SAST → SCA → build → Trivy → push →
+#                       Cosign sign → DAST
+#   schedule          → weekly SCA re-run to catch newly published CVEs
+#   workflow_dispatch → manual full-pipeline run, treated the same as push
+#                       for job-gating purposes (see event_name checks below)
 # ──────────────────────────────────────────────────────────────────
 on:
   push:
@@ -19,6 +21,7 @@ on:
     branches: [master, main]
   schedule:
     - cron: '0 2 * * 1'   # Weekly Monday 02:00 UTC — catches new CVEs
+  workflow_dispatch: {}   # manual on-demand full-pipeline run
 
 permissions:
   contents: read
@@ -44,7 +47,7 @@ jobs:
 # ══════════════════════════════════════════════════════════════════
   sast:
     name: SAST (Semgrep)
-    if: github.event_name == 'pull_request' || github.event_name == 'push'
+    if: github.event_name == 'pull_request' || github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     container:
       image: semgrep/semgrep
@@ -142,7 +145,7 @@ jobs:
   sast-gate:
     name: SAST Manual Review Gate
     needs: sast
-    if: github.event_name == 'pull_request' || github.event_name == 'push'
+    if: github.event_name == 'pull_request' || github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     # AUTO_APPROVE_GATES: set to 'true' in GitHub Settings → Variables → Actions
     # to bypass the manual pause (useful during active dev). Remove or set to
@@ -198,7 +201,7 @@ jobs:
 # ══════════════════════════════════════════════════════════════════
   sca-backend:
     name: SCA — Backend (npm audit)
-    if: github.event_name == 'pull_request' || github.event_name == 'push' || github.event_name == 'schedule'
+    if: github.event_name == 'pull_request' || github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     runs-on: ubuntu-latest
     outputs:
       has_findings: ${{ steps.audit.outputs.has_findings }}
@@ -285,7 +288,7 @@ jobs:
 # ══════════════════════════════════════════════════════════════════
   sca-frontend:
     name: SCA — Frontend (npm audit)
-    if: github.event_name == 'pull_request' || github.event_name == 'push' || github.event_name == 'schedule'
+    if: github.event_name == 'pull_request' || github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     runs-on: ubuntu-latest
     outputs:
       has_findings: ${{ steps.audit.outputs.has_findings }}
@@ -379,7 +382,7 @@ jobs:
   sca-gate:
     name: SCA Manual Review Gate
     needs: [sca-backend, sca-frontend]
-    if: github.event_name == 'pull_request' || github.event_name == 'push'
+    if: github.event_name == 'pull_request' || github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     environment: ${{ vars.AUTO_APPROVE_GATES != 'true' && (needs.sca-backend.outputs.has_findings == 'true' || needs.sca-frontend.outputs.has_findings == 'true') && 'sca-review' || '' }}
     outputs:
@@ -439,7 +442,7 @@ jobs:
 # ══════════════════════════════════════════════════════════════════
   build:
     name: Build Docker Images
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     needs: [sast-gate, sca-gate]
     runs-on: ubuntu-latest
     steps:
@@ -490,7 +493,7 @@ jobs:
 # ══════════════════════════════════════════════════════════════════
   container-scan:
     name: Container Scan (Trivy)
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     needs: build
     runs-on: ubuntu-latest
     outputs:
@@ -667,7 +670,7 @@ jobs:
   trivy-gate:
     name: Trivy Manual Review Gate
     needs: container-scan
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     environment: ${{ vars.AUTO_APPROVE_GATES != 'true' && needs.container-scan.outputs.has_findings == 'true' && 'trivy-review' || '' }}
     outputs:
