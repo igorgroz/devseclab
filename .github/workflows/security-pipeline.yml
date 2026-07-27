@@ -757,6 +757,16 @@ jobs:
           context: ./frontend
           file: ./frontend/Dockerfile
           push: true
+          # provenance/sbom default to auto-on in recent buildx, which wraps
+          # the pushed image in a multi-manifest index. That breaks the
+          # digest chain here: `outputs.digest` (what cosign signs below) can
+          # end up pointing to a different manifest than what the pushed tag
+          # itself resolves to, so the signature ends up on a digest nothing
+          # ever deploys against. Disabling both keeps this a single
+          # unambiguous manifest — same digest gets tagged, signed, attested,
+          # and verified end to end.
+          provenance: false
+          sbom: false
           tags: |
             ${{ env.FRONTEND_IMAGE }}:${{ github.sha }}
             ${{ env.FRONTEND_IMAGE }}:latest
@@ -771,6 +781,10 @@ jobs:
           context: ./backend
           file: ./backend/Dockerfile
           push: true
+          # See "Push frontend" above — same provenance/sbom digest-mismatch
+          # rationale.
+          provenance: false
+          sbom: false
           tags: |
             ${{ env.BACKEND_IMAGE }}:${{ github.sha }}
             ${{ env.BACKEND_IMAGE }}:latest
