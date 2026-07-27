@@ -1503,7 +1503,7 @@ jobs:
           role-to-assume: ${{ secrets.AWS_GITHUB_ACTIONS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Check cluster is reachable
+      - name: Check cluster and deployments are ready to patch
         id: cluster_check
         run: |
           if aws eks update-kubeconfig --name "${CLUSTER_NAME}" --region "${AWS_REGION}" 2>/dev/null \
@@ -1512,10 +1512,31 @@ jobs:
           else
             echo "reachable=false" >> "$GITHUB_OUTPUT"
             echo "::warning::EKS cluster ${CLUSTER_NAME} not found or not reachable — deploy skipped. Run deploy-lab.yml to provision."
+            exit 0
+          fi
+
+          # A reachable cluster doesn't mean the Deployment objects exist —
+          # after a stoplab.sh teardown they don't. `kubectl set image` can
+          # only patch an existing Deployment, it can't create one, so check
+          # for each independently rather than letting `set image` fail the
+          # job. First-ever deploy (or any post-teardown deploy) needs
+          # deploy-lab.yml instead, which does a full `kubectl apply`.
+          if kubectl -n dsl get deployment/backend >/dev/null 2>&1; then
+            echo "backend_exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "backend_exists=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::deployment/backend does not exist yet — skipping patch. Run deploy-lab.yml with image_tag=${{ github.sha }} to create it."
+          fi
+
+          if kubectl -n dsl get deployment/frontend >/dev/null 2>&1; then
+            echo "frontend_exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "frontend_exists=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::deployment/frontend does not exist yet — skipping patch. Run deploy-lab.yml with image_tag=${{ github.sha }} to create it."
           fi
 
       - name: Update backend image
-        if: steps.cluster_check.outputs.reachable == 'true'
+        if: steps.cluster_check.outputs.reachable == 'true' && steps.cluster_check.outputs.backend_exists == 'true'
         env:
           ECR_REGISTRY: ${{ needs.push-and-sign.outputs.ecr-registry }}
         run: |
@@ -1524,7 +1545,7 @@ jobs:
           kubectl -n dsl rollout status deployment/backend --timeout=10m
 
       - name: Update frontend image
-        if: steps.cluster_check.outputs.reachable == 'true'
+        if: steps.cluster_check.outputs.reachable == 'true' && steps.cluster_check.outputs.frontend_exists == 'true'
         env:
           ECR_REGISTRY: ${{ needs.push-and-sign.outputs.ecr-registry }}
         run: |
@@ -1533,7 +1554,7 @@ jobs:
           kubectl -n dsl rollout status deployment/frontend --timeout=10m
 
       - name: Smoke test
-        if: steps.cluster_check.outputs.reachable == 'true'
+        if: steps.cluster_check.outputs.reachable == 'true' && steps.cluster_check.outputs.backend_exists == 'true' && steps.cluster_check.outputs.frontend_exists == 'true'
         run: |
           ALB="$(kubectl -n dsl get ingress dsl-ingress \
             -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)"
@@ -1554,21 +1575,35 @@ jobs:
         if: always()
         run: |
           REACHABLE="${{ steps.cluster_check.outputs.reachable }}"
+          BE_EXISTS="${{ steps.cluster_check.outputs.backend_exists }}"
+          FE_EXISTS="${{ steps.cluster_check.outputs.frontend_exists }}"
           ECR="${{ needs.push-and-sign.outputs.ecr-registry }}"
           {
             echo "## Deploy Summary"
             echo ""
             echo "- Commit: \`${{ github.sha }}\`"
             echo "- Cluster reachable: \`${REACHABLE}\`"
-            if [ "${REACHABLE}" = "true" ]; then
-              echo "- Backend:  \`${ECR}/dsl-backend:${{ github.sha }}\`"
-              echo "- Frontend: \`${ECR}/dsl-frontend:${{ github.sha }}\`"
-            else
+            if [ "${REACHABLE}" != "true" ]; then
               echo ""
               echo "> Cluster was down at deploy time."
               echo "> To provision and deploy, trigger **deploy-lab.yml** with:"
               echo "> - \`run_terraform: true\`"
               echo "> - \`image_tag: ${{ github.sha }}\`"
               echo "> - \`allowed_cidr: <your-ip>/32\`"
+            elif [ "${BE_EXISTS}" != "true" ] || [ "${FE_EXISTS}" != "true" ]; then
+              echo "- Backend deployment exists: \`${BE_EXISTS}\`"
+              echo "- Frontend deployment exists: \`${FE_EXISTS}\`"
+              echo ""
+              echo "> Cluster is up but one or both Deployments don't exist yet"
+              echo "> (first deploy since provisioning, or after a stoplab.sh teardown)."
+              echo "> \`kubectl set image\` can only patch an existing Deployment,"
+              echo "> so this run intentionally skipped the patch rather than failing."
+              echo "> To create it, trigger **deploy-lab.yml** with:"
+              echo "> - \`run_terraform: true\` (or \`false\` if infra-lab is already up)"
+              echo "> - \`image_tag: ${{ github.sha }}\`"
+              echo "> - \`allowed_cidr: <your-ip>/32\`"
+            else
+              echo "- Backend:  \`${ECR}/dsl-backend:${{ github.sha }}\`"
+              echo "- Frontend: \`${ECR}/dsl-frontend:${{ github.sha }}\`"
             fi
           } >> "$GITHUB_STEP_SUMMARY"

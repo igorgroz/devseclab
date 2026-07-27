@@ -137,9 +137,12 @@ present (auto-passes clean; `vars.AUTO_APPROVE_GATES` can bypass):
    prints the image tag/digests and the `deploy-lab.yml` command to run
 8. **deploy** — patches the *already-running* EKS Deployments to the new
    image digests via `kubectl set image` (master/main only, requires
-   `attest` success). Only works if the Deployments already exist — after
-   a `stoplab.sh` teardown, use `deploy-lab.yml` instead, which creates
-   them fresh.
+   `attest` success). Checks first whether the cluster is reachable and
+   each Deployment actually exists; if not (cluster down, or first deploy
+   since a `stoplab.sh` teardown), it skips the patch with a `::warning::`
+   and a job-summary pointer to the `deploy-lab.yml` command instead of
+   failing the run. Use `deploy-lab.yml` for that first apply — it creates
+   the Deployments fresh; this job only ever patches existing ones.
 
 Only `push-and-sign`, `attest`, and `deploy` assume the AWS IAM role — all
 three gate on `github.ref == refs/heads/master|main`, so PR runs never
