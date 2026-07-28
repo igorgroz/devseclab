@@ -721,8 +721,16 @@ jobs:
       packages: write
       id-token: write
     outputs:
-      frontend-digest: ${{ steps.push-frontend.outputs.digest }}
-      backend-digest:  ${{ steps.push-backend.outputs.digest }}
+      # These are the digests actually observed in ECR *after* mirroring —
+      # not what build-push-action reported for the GHCR push. Every prior
+      # attempt at this workflow assumed a pre-copy digest would still be
+      # valid post-copy; every copy method (docker pull/tag/push, buildx
+      # imagetools, even cosign copy in one earlier attempt) broke that
+      # assumption differently. Reading back ground truth after the copy
+      # and signing exactly that removes the assumption instead of chasing
+      # individual tools. See "Resolve ECR digest" steps below.
+      frontend-digest: ${{ steps.resolve-frontend.outputs.digest }}
+      backend-digest:  ${{ steps.resolve-backend.outputs.digest }}
       ecr-registry:    ${{ steps.ecr-login.outputs.registry }}
     steps:
       - uses: actions/checkout@v4
@@ -792,40 +800,13 @@ jobs:
           build-args: |
             BUILDDATE=${{ github.run_id }}
 
-      - name: Sign frontend image
-        run: |
-          cosign sign --yes \
-            ${{ env.FRONTEND_IMAGE }}@${{ steps.push-frontend.outputs.digest }}
-
-      - name: Sign backend image
-        run: |
-          cosign sign --yes \
-            ${{ env.BACKEND_IMAGE }}@${{ steps.push-backend.outputs.digest }}
-
-      - name: Verify signatures
-        run: |
-          cosign verify \
-            --certificate-identity-regexp="https://github.com/${{ github.repository }}/.github/workflows/.*" \
-            --certificate-oidc-issuer="https://token.actions.githubusercontent.com" \
-            ${{ env.FRONTEND_IMAGE }}@${{ steps.push-frontend.outputs.digest }}
-
-          cosign verify \
-            --certificate-identity-regexp="https://github.com/${{ github.repository }}/.github/workflows/.*" \
-            --certificate-oidc-issuer="https://token.actions.githubusercontent.com" \
-            ${{ env.BACKEND_IMAGE }}@${{ steps.push-backend.outputs.digest }}
-
       - name: Mirror frontend to ECR
-        # Two prior attempts at this step both silently changed the digest:
-        # `docker pull`+`tag`+`push` re-serializes the manifest through the
-        # local Docker engine (different bytes, different digest); `docker
-        # buildx imagetools create` wraps even a single source in a fresh
-        # OCI index (also a different digest). Either way, Kyverno then
-        # fails to find a signature for whatever digest the ECR tag actually
-        # resolves to, because cosign signed the *original* digest.
-        # `cosign copy` is what this workflow already uses for the sig/att
-        # artifacts a few steps down (attest job) and has been digest-exact
-        # every time — it's built for precise OCI-artifact copies, not
-        # image construction, so use it for the base image too.
+        # Copy tool choice doesn't matter anymore — see "Resolve ECR
+        # digest" below. We stopped assuming any copy method preserves the
+        # digest (three different tools all broke it three different ways
+        # today); instead we read back whatever ECR actually ends up with
+        # afterward and sign that. cosign copy stays here as a working copy
+        # mechanism, not because its digest output is trusted.
         # Note: ECR repos are IMMUTABLE — skip push if tag already exists.
         run: |
           ECR="${{ steps.ecr-login.outputs.registry }}"
@@ -841,8 +822,7 @@ jobs:
           fi
 
       - name: Mirror backend to ECR
-        # See "Mirror frontend to ECR" above — same digest-preservation
-        # rationale.
+        # See "Mirror frontend to ECR" above.
         run: |
           ECR="${{ steps.ecr-login.outputs.registry }}"
           if aws ecr describe-images \
@@ -854,6 +834,58 @@ jobs:
             cosign copy -f \
               ${{ env.BACKEND_IMAGE }}@${{ steps.push-backend.outputs.digest }} \
               "${ECR}/dsl-backend:${{ github.sha }}"
+          fi
+
+      - name: Resolve ECR digest — frontend
+        # Ground truth, not an assumption: whatever the mirror step above
+        # actually produced in ECR, regardless of copy tool or any
+        # wrapping/re-serialization along the way. This is what a
+        # `docker pull`/Kyverno pull of the tag will actually resolve to —
+        # sign *this*, not the pre-copy digest.
+        id: resolve-frontend
+        run: |
+          DIGEST="$(aws ecr describe-images --repository-name dsl-frontend \
+            --image-ids imageTag=${{ github.sha }} --region "${AWS_REGION}" \
+            --query 'imageDetails[0].imageDigest' --output text)"
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "ECR frontend digest: ${DIGEST}"
+
+      - name: Resolve ECR digest — backend
+        id: resolve-backend
+        run: |
+          DIGEST="$(aws ecr describe-images --repository-name dsl-backend \
+            --image-ids imageTag=${{ github.sha }} --region "${AWS_REGION}" \
+            --query 'imageDetails[0].imageDigest' --output text)"
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "ECR backend digest: ${DIGEST}"
+
+      - name: Sign frontend image
+        # Signs the ECR image directly, at the digest ECR actually has —
+        # not the GHCR copy. Kyverno only ever checks ECR, so that's the
+        # only digest that needs a valid signature.
+        run: |
+          ECR="${{ steps.ecr-login.outputs.registry }}"
+          cosign sign --yes \
+            "${ECR}/dsl-frontend@${{ steps.resolve-frontend.outputs.digest }}"
+
+      - name: Sign backend image
+        run: |
+          ECR="${{ steps.ecr-login.outputs.registry }}"
+          cosign sign --yes \
+            "${ECR}/dsl-backend@${{ steps.resolve-backend.outputs.digest }}"
+
+      - name: Verify signatures
+        run: |
+          ECR="${{ steps.ecr-login.outputs.registry }}"
+          cosign verify \
+            --certificate-identity-regexp="https://github.com/${{ github.repository }}/.github/workflows/.*" \
+            --certificate-oidc-issuer="https://token.actions.githubusercontent.com" \
+            "${ECR}/dsl-frontend@${{ steps.resolve-frontend.outputs.digest }}"
+
+          cosign verify \
+            --certificate-identity-regexp="https://github.com/${{ github.repository }}/.github/workflows/.*" \
+            --certificate-oidc-issuer="https://token.actions.githubusercontent.com" \
+            "${ECR}/dsl-backend@${{ steps.resolve-backend.outputs.digest }}"
           fi
 
 # ══════════════════════════════════════════════════════════════════
@@ -1301,12 +1333,15 @@ jobs:
       - name: Install Cosign
         uses: sigstore/cosign-installer@v3
 
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          role-to-assume: ${{ secrets.AWS_GITHUB_ACTIONS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
 
       - name: Build vuln-signoff predicate
         env:
@@ -1377,78 +1412,36 @@ jobs:
           retention-days: 90
 
       - name: Attest frontend image
+        # Attests the ECR image directly, at the digest push-and-sign
+        # observed in ECR after mirroring (needs.push-and-sign.outputs.
+        # frontend-digest) — the same digest that was signed, not a GHCR
+        # reference. No more "sign/attest in GHCR, then hope a copy step
+        # preserves the digest into ECR" — this job talks to ECR from the
+        # start, so there's nothing to keep in sync.
         env:
+          ECR: ${{ steps.ecr-login.outputs.registry }}
           PREDICATE_TYPE: https://oznetsecure.com.au/attestations/vuln-signoff/v1
         run: |
           cosign attest --yes \
             --type "${PREDICATE_TYPE}" \
             --predicate predicate.json \
-            ${{ env.FRONTEND_IMAGE }}@${{ needs.push-and-sign.outputs.frontend-digest }}
+            "${ECR}/dsl-frontend@${{ needs.push-and-sign.outputs.frontend-digest }}"
 
       - name: Attest backend image
         env:
+          ECR: ${{ steps.ecr-login.outputs.registry }}
           PREDICATE_TYPE: https://oznetsecure.com.au/attestations/vuln-signoff/v1
         run: |
           cosign attest --yes \
             --type "${PREDICATE_TYPE}" \
             --predicate predicate.json \
-            ${{ env.BACKEND_IMAGE }}@${{ needs.push-and-sign.outputs.backend-digest }}
-
-      - name: Verify attestations
-        env:
-          PREDICATE_TYPE: https://oznetsecure.com.au/attestations/vuln-signoff/v1
-        run: |
-          cosign verify-attestation \
-            --type "${PREDICATE_TYPE}" \
-            --certificate-identity-regexp="https://github.com/${{ github.repository }}/.github/workflows/.*" \
-            --certificate-oidc-issuer="https://token.actions.githubusercontent.com" \
-            ${{ env.FRONTEND_IMAGE }}@${{ needs.push-and-sign.outputs.frontend-digest }} \
-            > /dev/null
-
-          cosign verify-attestation \
-            --type "${PREDICATE_TYPE}" \
-            --certificate-identity-regexp="https://github.com/${{ github.repository }}/.github/workflows/.*" \
-            --certificate-oidc-issuer="https://token.actions.githubusercontent.com" \
-            ${{ env.BACKEND_IMAGE }}@${{ needs.push-and-sign.outputs.backend-digest }} \
-            > /dev/null
-
-          echo "vuln-signoff/v1 attestation verified on both image digests."
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_GITHUB_ACTIONS_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Log in to ECR
-        id: ecr-login
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Copy signature + attestation to ECR
-        # cosign sign/attest above only ever wrote to GHCR (env.*_IMAGE).
-        # push-and-sign's ECR mirror is a bare `docker push` of the image
-        # manifest — it does not carry the .sig/.att OCI artifacts, which
-        # live at their own digest-derived tags in whichever repo created
-        # them. Kyverno's verifyImages looks for signature AND attestation
-        # in the SAME registry as the image being admitted, and the
-        # cluster pulls from ECR — so without this, the ECR copy is
-        # bytes-identical to GHCR but carries no proof of either, and
-        # Enforce mode rejects it on deploy. `cosign copy` brings both over
-        # in one shot, keyed off the shared digest. --only=sig,att skips
-        # copying the image layers themselves (already mirrored); -f
-        # overwrites if a stale copy exists at this digest's derived tag.
-        run: |
-          ECR="${{ steps.ecr-login.outputs.registry }}"
-          cosign copy -f --only=sig,att \
-            ${{ env.FRONTEND_IMAGE }}@${{ needs.push-and-sign.outputs.frontend-digest }} \
-            "${ECR}/dsl-frontend@${{ needs.push-and-sign.outputs.frontend-digest }}"
-          cosign copy -f --only=sig,att \
-            ${{ env.BACKEND_IMAGE }}@${{ needs.push-and-sign.outputs.backend-digest }} \
             "${ECR}/dsl-backend@${{ needs.push-and-sign.outputs.backend-digest }}"
 
-      - name: Verify signature + attestation on ECR copy
+      - name: Verify signature + attestation on ECR
+        env:
+          ECR: ${{ steps.ecr-login.outputs.registry }}
+          PREDICATE_TYPE: https://oznetsecure.com.au/attestations/vuln-signoff/v1
         run: |
-          ECR="${{ steps.ecr-login.outputs.registry }}"
           cosign verify \
             --certificate-identity-regexp="https://github.com/${{ github.repository }}/.github/workflows/.*" \
             --certificate-oidc-issuer="https://token.actions.githubusercontent.com" \
@@ -1460,18 +1453,18 @@ jobs:
             "${ECR}/dsl-backend@${{ needs.push-and-sign.outputs.backend-digest }}" > /dev/null
 
           cosign verify-attestation \
-            --type "https://oznetsecure.com.au/attestations/vuln-signoff/v1" \
+            --type "${PREDICATE_TYPE}" \
             --certificate-identity-regexp="https://github.com/${{ github.repository }}/.github/workflows/.*" \
             --certificate-oidc-issuer="https://token.actions.githubusercontent.com" \
             "${ECR}/dsl-frontend@${{ needs.push-and-sign.outputs.frontend-digest }}" > /dev/null
 
           cosign verify-attestation \
-            --type "https://oznetsecure.com.au/attestations/vuln-signoff/v1" \
+            --type "${PREDICATE_TYPE}" \
             --certificate-identity-regexp="https://github.com/${{ github.repository }}/.github/workflows/.*" \
             --certificate-oidc-issuer="https://token.actions.githubusercontent.com" \
             "${ECR}/dsl-backend@${{ needs.push-and-sign.outputs.backend-digest }}" > /dev/null
 
-          echo "ECR copy carries a valid signature and vuln-signoff/v1 attestation on both digests."
+          echo "ECR carries a valid signature and vuln-signoff/v1 attestation on both digests."
 
       - name: Print image details
         # This is the single source of truth for "what do I deploy." No
