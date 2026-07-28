@@ -886,7 +886,6 @@ jobs:
             --certificate-identity-regexp="https://github.com/${{ github.repository }}/.github/workflows/.*" \
             --certificate-oidc-issuer="https://token.actions.githubusercontent.com" \
             "${ECR}/dsl-backend@${{ steps.resolve-backend.outputs.digest }}"
-          fi
 
 # ══════════════════════════════════════════════════════════════════
 # JOB 6 — DAST: OWASP ZAP

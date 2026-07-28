@@ -6,127 +6,129 @@
 ## Project framing
 DevSecOps platform lab: hardened CI/CD supply-chain pipeline and EKS runtime.
 Learning exercise — app has no practical value; all value is in DevSecOps and
-modern app security concepts built around it.
+modern app security concepts built around it. Igor is starting a second,
+parallel lab (Azure DevOps + APIM, ground-up) next — this lab is being
+parked in a studyable state, not actively developed further for now.
 
-## Current phase
-**Kyverno Enforce — full verify chain reconfirmed live (Jul 23).**
-`deploy-lab.yml` ran clean end to end at pinned `5af67ab`; ALB ready, CNAME
-updated. Caveat: this re-verified the chain against the *old* May signature
-on `5af67ab`, not the new `cosign copy` ECR-propagation fix from `37d8e41`
-(that fix is only verified in-pipeline so far). Kyverno cleanup CronJob
-sub-issue (#1 below) still not re-tested despite two lab-up cycles now.
+## Current phase — image-integrity fix PROVEN, awaiting clean run (Jul 28)
+The read-back-and-sign restructure was committed (`796dcc4`) and run as
+pipeline **#145 — and the approach is confirmed correct**: `cosign verify`
+passed against `dsl-frontend@sha256:3af412fc…` and
+`dsl-backend@sha256:0c81f795…`, both digests read back *from ECR* after the
+mirror step. The tag-vs-signed-digest divergence that defeated three
+different copy tools on Jul 27 is resolved.
 
-## Last commit
-`a967027 fix(ecr): lifecycle rule 2 tagPrefixList never matched real tags` —
-pushed to origin/master (Jul 23). `infra-base` apply ran clean (11 added,
-1 changed, 11 destroyed).
+#145 still failed, but only on a **stray `fi`** at the end of the "Verify
+signatures" step — leftover from the deleted GHCR sig/att copy block. Bash
+executes incrementally, so both verifies ran and passed before the parser
+hit it and exited 2. Fixed Jul 28 (single line deleted); whole workflow now
+passes `yaml.safe_load` + `bash -n` on every `run` block.
 
-## Workflow note
-Commits/pushes and running lab start/stop scripts stay with Igor (his
-terminal, his SSH keys — the Claude sandbox has no GitHub push access).
-Claude does the code edits; Igor commits and runs them.
+**Consequence: `796dcc4` is NOT deployable.** `push-and-sign` exited
+non-zero → `attest` skipped → no `vuln-signoff/v1` attestation on those
+digests, and `dsl-verify-images` requires signature *and* attestation.
+Next action: commit the `fi` fix, let the pipeline run green through
+`attest`, take the tag from "Print image details", then `deploy-lab.yml`.
+That should be the first-ever end-to-end verified deploy.
 
-## Still dirty (uncommitted)
-- `bin/stoplab.sh` — mode-bit flip only, no content change.
-- `terraform/infra-base/main.tf` — narrowed GitHub Actions OIDC `sub`
-  condition from `repo:igorgroz/devseclab:*` (any branch/PR) to exact
-  matches: `ref:refs/heads/master`, `ref:refs/heads/main`,
-  `environment:lab`. Verified no `pull_request`-triggered job assumes the
-  role (push-and-sign/attest/deploy all gate on `refs/heads/master|main`).
-  **Needs `terraform apply` on `infra-base`** (separate state from
-  `infra-lab`, not touched by `stoplab.sh`) — applied Jul 27, git commit
-  still blocked by a local `.git/index.lock` (stale lock from an
-  interrupted process, not yet cleared/retried).
-- `.github/workflows/security-pipeline.yml` — added `workflow_dispatch`
-  trigger (previously push/PR/schedule only) plus `workflow_dispatch` to
-  every job-gating `if: github.event_name == ...` condition (8 jobs) so a
-  manual run executes the full pipeline. Also added a "Print image
-  details" step at the end of `attest` — prints tag/digests + a
-  ready-to-paste `deploy-lab.yml` command to the job summary.
-- `.github/workflows/deploy-lab.yml` — `image_tag` is now `required: true`
-  with no default; removed the "blank = use checked-in manifest pins"
-  fallback entirely (that pin went stale silently — see resolved-this-
-  session below) and added a 40-char-SHA format guard that fails loudly
-  instead of deploying something unexpected.
-- `README.md` — rewritten as the start/stop runbook: from-scratch
-  bootstrap (`infra-base` → `security-pipeline.yml` → `deploy-lab.yml`
-  with the printed tag), normal start, mid-session IP fix, stop, CI/CD
-  stage breakdown, Terraform state reference.
+## Prior phase — CI/CD image-integrity bug hunt (Jul 27)
+**The app was never successfully deployed this session.** Every
+`deploy-lab.yml` attempt was blocked by Kyverno's `dsl-verify-images`
+policy, for three *different* underlying reasons found in sequence:
+1. Checked-in pin `5af67ab` was silently expired by the ECR lifecycle cap
+   (see issue below) → `MANIFEST_UNKNOWN`.
+2. `docker/build-push-action`'s default provenance/SBOM attestation wraps
+   the pushed image in a multi-manifest index → the tag resolved to a
+   different digest than the one cosign signed → "no signatures found".
+   Fixed: `provenance: false`, `sbom: false` on both push steps.
+3. Still mismatched after (2) — the ECR mirror step's `docker pull`+`tag`+
+   `push` re-serializes the manifest through the local Docker engine (same
+   layers, different manifest bytes, different digest). Tried `docker
+   buildx imagetools create` next — **also** changed the digest (wraps a
+   single source in a fresh OCI index). Tried `cosign copy` for the mirror
+   — unverified when this was tried.
+
+**Real fix landed (architectural, not another tool swap):** stopped
+propagating a pre-copy digest through the mirror step at all. Restructured
+`push-and-sign` to mirror to ECR first, then **read back whatever digest
+ECR actually has** (`aws ecr describe-images` right after the mirror step),
+then sign *that observed digest* directly against ECR — not the GHCR copy.
+`attest` job now does the same: attests/verifies against ECR directly using
+the observed digest passed through as a job output, no GHCR references
+left anywhere in the signing/attestation chain, and the old "copy sig+att
+from GHCR to ECR" step is gone entirely since attestation now happens on
+ECR from the start. This removed the whole bug class instead of hoping a
+fourth copy tool would behave — validated in #145, see Current phase.
+No known-good pinned image exists right now; nothing has deployed
+successfully since `37d8e41` (Jul 23, in-pipeline only, never
+runtime-verified either).
+
+## Resolved this session
+- **GitHub Actions OIDC narrowed**: `terraform/infra-base/main.tf` `sub`
+  condition went from `repo:igorgroz/devseclab:*` (any branch/PR could
+  assume `AdministratorAccess`) to exact matches on
+  `ref:refs/heads/{master,main}` and `environment:lab`. Applied + committed.
+- **CI/CD redesigned to remove hidden state**: `deploy-lab.yml`'s
+  `image_tag` is now `required: true`, no "blank = use checked-in
+  manifest" fallback (that's what let issue 1 above happen silently) —
+  40-char-SHA format is validated, fails loudly otherwise.
+  `security-pipeline.yml` gained `workflow_dispatch` (all job-gates
+  updated), a "Print image details" step on `attest` (tag/digests/ready
+  `deploy-lab.yml` command in the job summary), and its `deploy` job now
+  checks cluster reachability *and* Deployment existence before patching —
+  skips gracefully with a warning instead of failing when either isn't
+  ready (was a hard failure before).
+- `README.md` rewritten as the actual runbook: from-scratch bootstrap
+  order, normal start, CI/CD stage breakdown, Terraform state reference
+  (incl. the one-way `infra-lab` → `infra-base` dependency via the
+  `data "aws_iam_role" "github_actions"` lookup).
 
 ## Open issues
-1. **Kyverno cleanup CronJob fix (`79b310c`) still NOT runtime-verified.**
-   `registry.k8s.io/kubectl` had no shell → swapped to `alpine/k8s:1.30.14`
-   (kept `runAsUser/runAsGroup: 65532`). No pod has reached `Completed` yet.
-   Next: confirm `kyverno-admission-controller` SA IRSA annotation, then
-   `kubectl -n kyverno create job --from=cronjob/kyverno-cleanup-admission-reports verify-1`
-   → watch for `Completed`; if it fails, check read-only-rootfs/`$HOME`
-   under UID 65532.
-2. **`paths-ignore` unverified** — no docs-only commit pushed since it landed.
-3. **ALBC vpcId pin** — hop_limit=1 blocks IMDS auto-discovery (pinned via TF output).
-4. **Nightly-destroy still DISABLED** post-rename — arm when ready:
-   `aws events enable-rule --name dsl-nightly-destroy --region ap-southeast-2`.
-5. **Identity/secrets hardening backlog**: GitHub Actions + nightly-destroy
-   roles hold `AdministratorAccess`; OIDC `sub` narrowed to exact
-   branch/environment claims (Jul 27, pending `terraform apply` — see
-   "Still dirty"), full least-privilege policy redesign still deferred to
-   next lab; `AUTH_MODE=dast`
-   HS256 bypass compiled into prod image (`authJwt.js`, env-var gated only,
-   no build-time strip/startup guard); public EKS endpoint; no KMS on etcd
-   Secrets; `JWT_AUDIENCE` is the bare API app GUID — unconfirmed against
-   the API app's real `accessTokenAcceptedVersion` (may need `api://`
-   prefix); no `azuread` Terraform provider — Entra app registrations are
-   portal-only, the one identity plane with no IaC source of truth.
+1. **Kyverno cleanup CronJob (`79b310c`) still NOT runtime-verified** —
+   three lab-up cycles now, never reached `Completed`.
+2. **`paths-ignore` still unverified** — no genuinely docs-only commit
+   pushed yet (every push this session mixed in code/workflow changes).
+3. **ECR lifecycle policy needs a real look, not just the Jul 23 tag-match
+   fix.** Each build pushes 3 tagged entries per service (SHA tag + `.sig`
+   + `.att`); count-based cap (`lifecycle_tagged_count=10`) churns fast
+   across a few pipeline runs. Also observed 25+ entries sitting unpruned
+   past the cap same day — enforcement timing is unclear/unreliable, not
+   just the threshold. Investigate before trusting any pinned tag again.
+4. **Repo workflow was direct-to-master all session** — `pull_request`
+   trigger's SAST/SCA "fast gate before merge" design was never actually
+   exercised as a pre-merge gate. Fine for solo lab, worth doing properly
+   (feature branch → PR → main) in the new Azure lab.
+5. **Identity/secrets backlog** (deferred to new lab by design): IAM roles
+   still `AdministratorAccess` (sub-narrowing done, full least-privilege
+   redesign not); `AUTH_MODE=dast` HS256 bypass compiled into prod image;
+   public EKS endpoint; no KMS on etcd; `JWT_AUDIENCE` unconfirmed against
+   Entra API app manifest; no `azuread` Terraform provider.
+6. Nightly-destroy still disabled; ALBC vpcId pin (hop_limit=1) — both
+   unchanged, non-urgent.
 
-## Next actions — start of next session
-1. **Restart lab** via deploy-lab.yml (blank image_tag → checked-in 5af67ab pin).
-2. **Verify Kyverno cleanup CronJob fix end-to-end** (Open issue #1).
-3. **Push a docs-only commit** to confirm `paths-ignore` works (Open issue #2).
-4. **Confirm `JWT_AUDIENCE` format** against the API app's real manifest.
-5. **NetworkPolicies + PSS** on the `dsl` namespace.
-6. **IAM hardening** — narrow GitHub Actions role; tighten OIDC `sub`.
-7. **Istio + Kong study** — deploy manually alongside the app, outside pipeline.
-
-## Resolved prior sessions (condensed)
-- **Jul 23**: Node 20 EOL broke the backend build (npm@latest engine bump)
-  → both Dockerfiles to `node:24-alpine`. `paths-ignore` never actually
-  existed despite a commit claiming to add it → added for real. Stray
-  `sqlinj-*` naming in `security-pipeline.yml` reverted to `dsl-*`. ECR
-  mirror carried image bytes but not cosign `.sig`/`.att` (GHCR-only) →
-  `attest` job now `cosign copy`s both to ECR post-attest, verified
-  in-pipeline. ECR lifecycle rule 2 `tagPrefixList` never matched real
-  tags → `tagPatternList=["*"]`; `infra-base` apply also caught pre-existing
-  unapplied `sqlinj-*`→`dsl-*` drift on the nightly-destroy automation —
-  applied clean, isolated to `infra-base` state. Full lab redeploy
-  succeeded end to end, CNAME updated, then stopped clean via
-  `bin/stoplab.sh` (64 resources). Reviewed Entra ID/OAuth2 architecture in
-  depth (no code changes) — findings folded into Identity backlog above.
-- **May 22**: deploy-lab.yml terraform-init gating bug, stdout-wrapper token
-  leak, MANIFEST_UNKNOWN pin bug, attestation JMESPath prefix bug — all
-  fixed. Promotion model decided: build≠deploy, paths-ignore prevents
-  promote→rebuild loop. ECR sign/attest digest mismatch, Kyverno IRSA
-  chain, ClusterPolicy Enforce, webhook TLS/caBundle reinstall — resolved.
-
-## Lab state
-**STOPPED (Jul 23, clean `bin/stoplab.sh` teardown — 64 resources).**
-Restart via deploy-lab.yml (blank image_tag uses the checked-in 5af67ab pin).
+## Lab state — infra-lab status still UNCONFIRMED
+Jul 27's "didn't work" referred to the **CI commit/pipeline**, not
+`stoplab.sh` — that's now understood (the stray `fi`). But whether
+`infra-lab` is actually torn down was never confirmed either way. Verify
+directly before assuming, since #145's `deploy` job never ran:
+`aws eks describe-cluster --name dsl-eks --region ap-southeast-2` and
+`terraform -chdir=terraform/infra-lab show`. `infra-base` is never
+destroyed by this runbook.
 
 ## Key paths
-- Start/stop runbook: `README.md` (gh CLI commands, whitelist-me.sh, stoplab.sh)
+- Start/stop runbook: `README.md`
 - Kyverno policy: `k8s/kyverno/clusterpolicy-image-verify.yaml`
 - Kyverno IRSA: `terraform/infra-lab/kyverno-irsa.tf` · chart values: `helm/kyverno/values.yaml`
 - Runbooks: `KYVERNO_ECR_VERIFY_FIX.md`, `KYVERNO_DEEP_DIVE.md`, `IDENTITY_TRUST_AND_SECRETS.md`
-- Phase docs: `PHASE2.md`, `PHASE3B3.md`
-- Manifests: `k8s/{backend,frontend,db,eso}/`, `k8s/ingress.yaml`
 - IaC: `terraform/infra-lab/`, `terraform/infra-base/`
 - Pipeline: `.github/workflows/security-pipeline.yml`, `deploy-lab.yml`
-- Attestation schema: `.github/attestations/vuln-signoff.schema.json`
 - Entra auth: `frontend/src/auth/authConfig.js`, `backend/authJwt.js`
 
 ## AWS / cluster identifiers
 - Account `510151297987`, region `ap-southeast-2`
 - EKS cluster `dsl-eks` (v1.35.4, AL2023)
 - ECR: `510151297987.dkr.ecr.ap-southeast-2.amazonaws.com/dsl-{backend,frontend}`
-- Signed image SHA: `5af67ab` (full `5af67ab43c9060b846cb71d16749fc427b63bb55`; ECR digest `07e6aada…`)
+- No valid pinned image SHA currently — see Current phase
 - IRSA: `dsl-eks-eso-role`, `dsl-backend-sa`, `dsl-eks-kyverno-ecr-read`
 - Secrets (SM): `dsl/backend/db-password`, `dsl/backend/jwt-secret`
 - Entra: tenant `487f7bd9-…`, SPA `a6960366-…`, API `af63b7cb-…` (v2 tokens)
