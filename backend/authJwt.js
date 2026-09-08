@@ -51,7 +51,7 @@ async function verifyEntraToken(token) {
 // ─────────────────────────────────────────────────────────────────────────────
 // DAST path — HS256 verification against a static secret.
 // The token is minted by generateDastToken.js and stored as a GitHub secret.
-// Claims shape mirrors the Entra ID token so requireScope() works unchanged.
+// Claims shape mirrors the Entra ID token so scope and role checks work unchanged.
 // ─────────────────────────────────────────────────────────────────────────────
 async function verifyDastToken(token) {
   const secret = process.env.DAST_JWT_SECRET;
@@ -113,4 +113,19 @@ function requireScope(requiredScope) {
   };
 }
 
-module.exports = { requireJwt, requireScope };
+function requireAnyRole(...allowedRoles) {
+  return (req, res, next) => {
+    const roles = req.user?.roles || [];
+
+    if (!allowedRoles.some((role) => roles.includes(role))) {
+      return res.status(403).json({
+        error: "insufficient_role",
+        allowed: allowedRoles,
+      });
+    }
+
+    return next();
+  };
+}
+
+module.exports = { requireJwt, requireScope, requireAnyRole };

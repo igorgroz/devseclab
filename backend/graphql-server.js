@@ -18,7 +18,24 @@
 
 const { ApolloServer } = require("@apollo/server");
 const { expressMiddleware } = require("@apollo/server/express4");
+const { GraphQLError } = require("graphql");
 const pool = require("./db");
+
+function requireGraphqlAccess(user, requiredScope, ...allowedRoles) {
+  const scopes = user?.scp || [];
+  if (!scopes.includes(requiredScope)) {
+    throw new GraphQLError("Insufficient OAuth scope", {
+      extensions: { code: "FORBIDDEN", requiredScope },
+    });
+  }
+
+  const roles = user?.roles || [];
+  if (!allowedRoles.some((role) => roles.includes(role))) {
+    throw new GraphQLError("Insufficient application role", {
+      extensions: { code: "FORBIDDEN", allowedRoles },
+    });
+  }
+}
 
 // ── Schema ────────────────────────────────────────────────────────────────────
 // Mirrors the schema in insecureGraphQL.js / secureGraphQL.js so the Apollo
@@ -63,12 +80,14 @@ const typeDefs = `#graphql
 // Args are destructured from the second parameter: (parent, args, context, info)
 const resolvers = {
   Query: {
-    getUsers: async () => {
+    getUsers: async (_parent, _args, { user }) => {
+      requireGraphqlAccess(user, "user.read", "Wardrobe.Reader", "Wardrobe.Creator");
       const result = await pool.query("SELECT * FROM users ORDER BY userid");
       return result.rows;
     },
 
-    getClothesByUser: async (_parent, { userid }) => {
+    getClothesByUser: async (_parent, { userid }, { user }) => {
+      requireGraphqlAccess(user, "user.read", "Wardrobe.Reader", "Wardrobe.Creator");
       const result = await pool.query(
         `SELECT u.userid, u.name, u.surname, c.clothid, c.description, c.color
          FROM user_clothes uc
@@ -83,7 +102,8 @@ const resolvers = {
   },
 
   Mutation: {
-    addCloth: async (_parent, { userid, clothid }) => {
+    addCloth: async (_parent, { userid, clothid }, { user }) => {
+      requireGraphqlAccess(user, "user.write", "Wardrobe.Creator");
       await pool.query(
         "INSERT INTO user_clothes (userid, clothid) VALUES ($1, $2)",
         [userid, clothid]
@@ -91,7 +111,8 @@ const resolvers = {
       return `ClothID ${clothid} added for userID ${userid}`;
     },
 
-    removeCloth: async (_parent, { userid, clothid }) => {
+    removeCloth: async (_parent, { userid, clothid }, { user }) => {
+      requireGraphqlAccess(user, "user.write", "Wardrobe.Creator");
       await pool.query(
         "DELETE FROM user_clothes WHERE userid = $1 AND clothid = $2",
         [userid, clothid]

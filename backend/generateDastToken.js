@@ -27,14 +27,14 @@ if (secret.length < 32) {
   console.warn("Warning: DAST_JWT_SECRET is shorter than 32 characters. Use a longer secret.");
 }
 
-// Claims mirror what Entra ID issues so requireScope() in authJwt.js
-// works without any changes.
+// Claims mirror what Entra ID issues so scope and role checks in authJwt.js
+// work without any changes.
 // scp is a space-separated string — same format as Entra ID access tokens.
 const claims = {
   sub:   "dast-test-user",
   oid:   "00000000-0000-0000-0000-000000000001",
   tid:   "dast",
-  roles: [],
+  roles: ["Wardrobe.Creator"],
   scp:   "user.read user.write",    // grants access to all secure routes
 };
 

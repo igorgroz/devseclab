@@ -944,7 +944,11 @@ jobs:
               const jwt = require("jsonwebtoken");
               process.stdout.write(
                 jwt.sign(
-                  { sub: "dast-smoke", scp: "user.read user.write" },
+                  {
+                    sub: "dast-smoke",
+                    scp: "user.read user.write",
+                    roles: ["Wardrobe.Creator"]
+                  },
                   process.env.DAST_JWT_SECRET,
                   { algorithm: "HS256", expiresIn: "1h" }
                 )
