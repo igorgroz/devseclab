@@ -105,11 +105,14 @@ const root = {
 };
 
 // Create middleware
-const secureGraphQLMiddleware = graphqlHTTP({
+const secureGraphQLMiddleware = graphqlHTTP((req) => ({
   schema,
   rootValue: root,
-  context: (req) => ({ user: req.user }),
+  // express-graphql treats `context` as a value, not a callback. Build the
+  // complete options object per request so the JWT middleware's req.user is
+  // passed to the resolvers rather than passing a function as the context.
+  context: { user: req.user },
   graphiql: true, // Enable GraphiQL for debugging
-});
+}));
 
 module.exports = { secureGraphQLMiddleware };
