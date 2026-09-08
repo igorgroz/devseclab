@@ -1580,7 +1580,9 @@ jobs:
             exit 0
           fi
           for i in $(seq 1 12); do
-            if curl -kfsS "https://${ALB}/health" >/dev/null; then
+            if curl -kfsS --connect-timeout 5 --max-time 15 \
+                -H "Host: lab.oznetsecure.com.au" \
+                "https://${ALB}/health" >/dev/null; then
               echo "Smoke test passed: https://${ALB}/health"
               exit 0
             fi
