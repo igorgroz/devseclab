@@ -16,7 +16,7 @@
 #   with "context deadline exceeded" — which looks like the webhook is down
 #   but is really a stalled cosign verify.
 #
-#   See KYVERNO_ECR_VERIFY_FIX.md (repo root) for the full root cause analysis.
+#   See docs/KYVERNO_ECR_VERIFY_FIX.md for the full root cause analysis.
 #
 # SCOPE
 #   Read-only ECR access against the two app repositories. This Pod has no

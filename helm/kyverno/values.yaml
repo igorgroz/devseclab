@@ -55,7 +55,7 @@
 #      an explicit non-root UID override the pods fail admission with
 #      CreateContainerConfigError ("container has runAsNonRoot and image
 #      will run as root") — this was silently broken for every 10-minute
-#      cleanup tick until diagnosed (see Open issues in SESSION_STATE.md,
+#      cleanup tick until diagnosed (see Open issues in docs/SESSION_STATE.md,
 #      resolved 2026-07-16). 65532 is the conventional distroless/
 #      "nonroot" UID; kubectl and bash are installed world-executable by
 #      apk, so any non-zero UID works.
@@ -72,7 +72,7 @@
 #   - validationFailureAction overrides etc. — those belong on the
 #     ClusterPolicy itself (k8s/kyverno/clusterpolicy-image-verify.yaml).
 #
-# REF: KYVERNO_ECR_VERIFY_FIX.md (repo root) — full root-cause analysis.
+# REF: docs/KYVERNO_ECR_VERIFY_FIX.md — full root-cause analysis.
 # =============================================================================
 
 admissionController:

@@ -204,6 +204,6 @@ Keep this in a clearly labelled “personal lab,” “hands-on learning,” or 
 - `helm/` controller values
 - `backend/` and `frontend/src/`
 - `docker-compose.yml` and `docker-compose.dast.yml`
-- `README.md`, `Architecture.md`, `SESSION_STATE.md`, and the security deep-dive/decision records
+- `README.md`, `docs/Architecture.md`, `docs/SESSION_STATE.md`, and the security deep-dive/decision records under `docs/`
 
 Repository state and runtime claims were reconciled against `SESSION_STATE.md` on 12 September 2026.

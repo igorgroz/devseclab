@@ -4,7 +4,7 @@
 
 **Environment fixtures:** AWS account `510151297987`, region `ap-southeast-2`, EKS cluster `dsl-eks`, repo `igorgroz/devseclab`, app domain `lab.oznetsecure.com.au`.
 
-> **Naming note, read this first.** AWS-side names mix three prefixes and it will trip you up: `dsl-eks-*` / `dsl-*` for the cluster, IRSA roles and Secrets Manager paths; `devseclab-*` for the GitHub Actions role; and a legacy `sqlinj-*` for the Terraform state bucket. The Secrets Manager paths are `dsl/backend/*` — but `SESSION_STATE.md` still records them as `sqlinj/backend/*`, which is stale. Treat `dsl/backend/*` as authoritative.
+> **Naming note, read this first.** AWS-side names mix three prefixes and it will trip you up: `dsl-eks-*` / `dsl-*` for the cluster, IRSA roles and Secrets Manager paths; `devseclab-*` for the GitHub Actions role; and a legacy `sqlinj-*` for the Terraform state bucket. The Secrets Manager paths are `dsl/backend/*`; treat those paths as authoritative.
 
 ---
 
@@ -187,7 +187,7 @@ Inventory is only half the value; here's where the trust is shaped more loosely 
 
 **9. Hardcoded credentials in committed dev files.** `docker-compose.yml` carries `StrongPassword123` for local Postgres. It's local-only, but it's in Git history forever. Move local dev secrets to a `.env` file that's gitignored, and scrub history if any of these values were ever reused in a real environment.
 
-**10. Naming inconsistencies create operational risk.** Three prefixes (`dsl-*`, `devseclab-*`, `sqlinj-*`) coexist, and `SESSION_STATE.md` records the SM paths as `sqlinj/backend/*` when the live paths are `dsl/backend/*`. Stale identifiers in runbooks lead to "why can't I find this secret" dead-ends. Fix the SESSION_STATE reference, and decide whether the state bucket rename is worth the migration.
+**10. Naming inconsistencies create operational risk.** Three prefixes (`dsl-*`, `devseclab-*`, `sqlinj-*`) coexist. The live Secrets Manager paths are `dsl/backend/*`; stale identifiers in runbooks can lead to "why can't I find this secret" dead-ends. Decide whether the legacy state-bucket name is worth migrating.
 
 **11. ESO role reads the whole `dsl/*` prefix.** Slightly broader than the two secrets it actually pulls. Scope it to `dsl/backend/*` (or the exact two ARNs) so a future secret under `dsl/` isn't automatically readable by ESO.
 

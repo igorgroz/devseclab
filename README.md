@@ -1,170 +1,119 @@
-# devseclab — lab start/stop
+# DevSecOps Security Lab
 
-Operational runbook for bringing the lab up and tearing it down. See
-`SESSION_STATE.md` for current status and open issues.
+A hands-on DevSecOps showcase built around a deliberately vulnerable React,
+Node.js and PostgreSQL application. The application provides something concrete
+to protect; the main focus is the security pipeline, software-supply-chain
+integrity, cloud identity, Kubernetes admission control and AWS infrastructure.
 
-**No implicit pins.** `deploy-lab.yml` always requires an explicit
-`image_tag` — there is no "blank = use checked-in manifest" fallback
-anymore. That fallback used to silently break whenever ECR's lifecycle
-policy expired the pinned tag (see `SESSION_STATE.md`, Jul 27). The image
-you deploy always comes from a `security-pipeline.yml` run, copied by hand.
-One direction of dependency, no hidden state.
+> Personal learning project inspired by enterprise security patterns. The
+> insecure REST and GraphQL routes are intentional test targets and are not
+> production examples.
 
-## From scratch (no `infra-base` yet)
+## What this demonstrates
 
-Only needed once per AWS account, or after a full account wipe.
+- GitHub Actions pipeline integrating Semgrep SAST, `npm audit` SCA, Trivy
+  container scanning and OWASP ZAP DAST.
+- Review gates and a signed `vuln-signoff/v1` attestation recording accepted
+  security outcomes.
+- Cosign keyless signing through GitHub OIDC/Sigstore, with images stored in
+  private Amazon ECR under immutable full-Git-SHA tags.
+- Kyverno admission enforcement that verifies the image signature and
+  vulnerability attestation before allowing an application Pod to run.
+- Terraform-provisioned VPC, EKS, IAM/OIDC/IRSA, ECR, Secrets Manager, ALB and
+  EBS resources.
+- External Secrets Operator synchronizing AWS Secrets Manager values into
+  Kubernetes without storing live secret values in Git.
+- Microsoft Entra ID SPA authentication, API token validation, delegated OAuth
+  scopes and `Wardrobe.Reader` / `Wardrobe.Creator` application roles.
+- Secure and intentionally insecure REST/GraphQL implementations for comparing
+  authentication, authorization and SQL-injection controls.
 
-```bash
-cd terraform/infra-base
-terraform init -input=false
-terraform plan -out=tfplan
-terraform apply "tfplan"
+## Architecture at a glance
+
+```mermaid
+flowchart LR
+    Dev[Developer] --> GH[GitHub Actions]
+    GH --> Scan[SAST · SCA · Trivy · ZAP]
+    Scan --> Sign[Cosign signature + signed attestation]
+    Sign --> ECR[Private Amazon ECR]
+
+    User[Browser user] --> Entra[Microsoft Entra ID]
+    User --> ALB[AWS Application Load Balancer]
+    Entra -->|access token| User
+    ALB --> FE[React SPA on EKS]
+    FE -->|Bearer token| API[Node.js API on EKS]
+    API --> DB[(PostgreSQL on EBS)]
+
+    ECR -->|signed image| Kyverno[Kyverno admission policy]
+    Kyverno -->|admit verified workload| FE
+    Kyverno -->|admit verified workload| API
+    Secrets[AWS Secrets Manager] --> ESO[External Secrets Operator]
+    ESO --> API
+    ESO --> DB
 ```
 
-This creates the ECR repos, IAM roles (incl. GitHub Actions OIDC role),
-and nightly-destroy automation. No cluster yet — none of this needs one.
+DNS resolves the public lab hostname to the ALB but is not a traffic proxy.
+EKS nodes and VPC-CNI Pod addresses live in private subnets; the ALB and NAT
+Gateway use public subnets. The ALB targets Pods directly by IP.
 
-Once `infra-base` exists, continue below as normal.
+## Proven outcome
 
-## Normal start (base infra already exists)
+The complete pipeline was demonstrated successfully in security-pipeline run
+**#157** for commit `719f8a91afb10b859ca22af7037a4731a1d92fc8`.
+At runtime, Kyverno was `Ready=True` in `Enforce` mode:
 
-**Step 1 — build a signed image.** `security-pipeline.yml` builds, scans,
-signs, and attests images — this is the only thing that produces something
-deployable. It doesn't need a cluster (only its own `deploy` job does, and
-that job no-ops gracefully if the cluster isn't up yet):
+- the signed and attested frontend/backend images were admitted and ran;
+- an unsigned backend image was rejected by a server-side admission dry-run;
+- a Reader token could read but not modify wardrobe data;
+- a Creator token could read and modify wardrobe data.
 
-```bash
-gh workflow run security-pipeline.yml
-gh run watch
-```
+The EKS portion is intentionally ephemeral and can be destroyed after each lab
+session while the base IAM, ECR and Terraform state remain available.
 
-At the end of the run, the job summary for the `attest` job prints an
-"Image built by this run" table with the exact tag and a ready-to-paste
-`deploy-lab.yml` command. Copy the tag from there — don't guess it, don't
-assume `github.sha` from your local checkout matches what got built.
+## Repository map
 
-**Step 2 — deploy it.** `image_tag` is required, no default:
+| Path | Purpose |
+|---|---|
+| `.github/workflows/security-pipeline.yml` | Scan, build, sign, attest and update a running deployment |
+| `.github/workflows/deploy-lab.yml` | Provision/start the lab and deploy a verified release |
+| `terraform/infra-base/` | Persistent ECR, GitHub OIDC/IAM and teardown automation |
+| `terraform/infra-lab/` | Ephemeral VPC, EKS, IAM/IRSA, secrets and controllers |
+| `k8s/` | Application, ingress, External Secrets and Kyverno manifests |
+| `helm/` | Controller configuration |
+| `frontend/` | React SPA and MSAL integration |
+| `backend/` | Express REST/GraphQL API and JWT authorization |
+| `postgredb/` | PostgreSQL initialization |
+| `bin/` | Operational helper scripts |
+| `docs/` | Architecture, evidence, decisions, deep dives and runbooks |
 
-```bash
-gh workflow run deploy-lab.yml \
-  -f allowed_cidr="$(curl -s https://icanhazip.com)/32" \
-  -f image_tag="<tag from step 1>" \
-  -f run_terraform=true
-```
+## Run the lab
 
-- `run_terraform=true` provisions `infra-lab` from scratch (cluster doesn't
-  exist yet, or you tore it down with `stoplab.sh`).
-- `run_terraform=false` if `infra-lab` is already up and you just want to
-  redeploy manifests against it (e.g. rolling out a newer image without a
-  full infra cycle).
+The normal workflow is:
 
-Watch it:
+1. Run `security-pipeline.yml` and copy the full Git-SHA image tag printed by
+   its attestation summary.
+2. Run `deploy-lab.yml` with that tag, your current public IP as a `/32`, and
+   Terraform enabled when creating a fresh cluster.
+3. Stop the ephemeral environment with `bin/stoplab.sh` when finished.
 
-```bash
-gh run list --workflow=deploy-lab.yml --limit=1
-gh run watch
-```
+Exact commands, prerequisites and recovery notes are in the
+[operations guide](docs/OPERATIONS.md).
 
-Confirm it's reachable:
+## Documentation
 
-```bash
-curl -sI https://lab.oznetsecure.com.au/health
-```
+- [Technical inventory and evidence](docs/DEVSECLAB_INVENTORY.md)
+- [Architecture and design](docs/Architecture.md)
+- [Identity, trust and secrets](docs/IDENTITY_TRUST_AND_SECRETS.md)
+- [Cosign signing deep dive](docs/COSIGN_SIGNING_DEEP_DIVE.md)
+- [Kyverno deep dive](docs/KYVERNO_DEEP_DIVE.md)
+- [Security decisions and accepted lab risks](docs/LAB_SECURITY_DECISIONS.md)
+- [Current session state](docs/SESSION_STATE.md)
 
-### Mid-session IP change
+## Deliberate limitations
 
-If your public IP rotates while the lab is still up (ISP renewal, network
-switch), the ALB will silently stop responding to you. Re-whitelist without
-a full redeploy:
-
-```bash
-bin/whitelist-me.sh          # interactive
-bin/whitelist-me.sh -y       # no prompt
-```
-
-### Redeploying after code changes, lab already up
-
-Once `infra-lab` is up, a normal push to `master` (or a manual
-`gh workflow run security-pipeline.yml`) runs the full pipeline *and* its
-own `deploy` job patches the running Deployments directly via
-`kubectl set image` — no need to touch `deploy-lab.yml` again unless the
-cluster itself was torn down.
-
-## Stop
-
-**Requires `infra-base` to already exist.** `infra-lab/main.tf` does a live
-lookup (`data "aws_iam_role" "github_actions"`) of the `devseclab-github-actions`
-role that `infra-base` creates, and wires it into an EKS access entry. Terraform
-has to resolve that data source to build the destroy plan — if `infra-base`
-were ever torn down first, `stoplab.sh` would fail before doing anything.
-In practice this is never an issue since `infra-base` is never destroyed by
-this runbook, but it's why the two states aren't fully independent despite
-living in separate Terraform state files.
-
-Full clean teardown of `infra-lab` (workloads, ingress, Helm releases,
-Terraform-managed infra — 64 resources on a typical run):
-
-```bash
-bin/stoplab.sh
-```
-
-**Note:** this only tears down `infra-lab`. `infra-base` is a separate
-Terraform state and is never touched by `stoplab.sh` — it persists across
-every start/stop cycle by design. After a stop, the next start needs both
-steps above again (`security-pipeline.yml` if you don't already have a
-known-good tag still alive in ECR, then `deploy-lab.yml` with that tag).
-
-## CI/CD — security-pipeline.yml
-
-Triggers: push to `master`/`main` (skips docs-only / `k8s/`, `helm/`,
-`terraform/`-only changes via `paths-ignore`), every PR into `master`/`main`,
-a weekly Monday 02:00 UTC cron (catches newly-disclosed CVEs), and manual
-`workflow_dispatch`.
-
-Stage order, each gated by a manual-review environment when findings are
-present (auto-passes clean; `vars.AUTO_APPROVE_GATES` can bypass):
-
-1. **sast** (Semgrep) → `sast-gate`
-2. **sca-backend** / **sca-frontend** (npm audit) → `sca-gate`
-3. **build** (Docker images, not pushed yet)
-4. **container-scan** (Trivy) → `trivy-gate`
-5. **push-and-sign** — pushes to GHCR, Cosign keyless-signs, mirrors image
-   + signature to ECR (master/main only)
-6. **dast** (OWASP ZAP baseline + API scan against a live stack) →
-   `dast-gate`
-7. **attest** — writes and signs the `vuln-signoff` attestation, copies it
-   to ECR, verifies both signature and attestation on the ECR copy, then
-   prints the image tag/digests and the `deploy-lab.yml` command to run
-8. **deploy** — patches the *already-running* EKS Deployments to the new
-   image digests via `kubectl set image` (master/main only, requires
-   `attest` success). Checks first whether the cluster is reachable and
-   each Deployment actually exists; if not (cluster down, or first deploy
-   since a `stoplab.sh` teardown), it skips the patch with a `::warning::`
-   and a job-summary pointer to the `deploy-lab.yml` command instead of
-   failing the run. Use `deploy-lab.yml` for that first apply — it creates
-   the Deployments fresh; this job only ever patches existing ones.
-
-Only `push-and-sign`, `attest`, and `deploy` assume the AWS IAM role — all
-three gate on `github.ref == refs/heads/master|main`, so PR runs never
-reach AWS credentials.
-
-## Terraform state reference
-
-Two separate states — know which one you're touching.
-
-- **`infra-lab`** — cluster, networking, everything `stoplab.sh` destroys.
-  Normally driven by `deploy-lab.yml` (`run_terraform=true`). Manual
-  plan/apply: `cd terraform/infra-lab && terraform init -input=false &&
-  terraform plan -out=tfplan && terraform apply "tfplan"`.
-- **`infra-base`** — IAM roles, OIDC provider, ECR repos, nightly-destroy
-  automation. Persists across every lab start/stop. Only touch this for
-  IAM/ECR/account-level config changes, not routine lab cycles. Same
-  init/plan/apply pattern, from `terraform/infra-base`.
-
-`tfplan` is gitignored; commit only the `.tf` source changes.
-
-## Key identifiers
-
-- Cluster: `dsl-eks` (`ap-southeast-2`)
-- Lab URL: `https://lab.oznetsecure.com.au`
-- Account: `510151297987`
+This remains a learning environment rather than a production platform. Known
+hardening opportunities include least-privilege GitHub deployment roles,
+private/restricted EKS API access, Kubernetes NetworkPolicies and stronger Pod
+Security settings, removal of the CI-only DAST authentication bypass from the
+production artifact, dependency modernization, automated unit/integration
+tests, and broader runtime observability.

@@ -133,7 +133,7 @@ resource "aws_cloudwatch_log_group" "codebuild_destroy" {
 
 # =============================================================================
 # CodeBuild project — terraform destroy runner
-# Accepted risk (lab): no KMS CMK encryption. See LAB_SECURITY_DECISIONS.md TF-03.
+# Accepted risk (lab): no KMS CMK encryption. See docs/LAB_SECURITY_DECISIONS.md TF-03.
 # =============================================================================
 resource "aws_codebuild_project" "nightly_destroy" {
   name          = "dsl-nightly-destroy"
@@ -370,7 +370,7 @@ resource "aws_iam_role" "github_actions" {
 }
 
 # Lab: AdministratorAccess for simplicity — same acknowledged trade-off as the
-# CodeBuild destroy role. See LAB_SECURITY_DECISIONS.md for the production path.
+# CodeBuild destroy role. See docs/LAB_SECURITY_DECISIONS.md for the production path.
 resource "aws_iam_role_policy_attachment" "github_actions_admin" {
   role       = aws_iam_role.github_actions.name
   policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess"
